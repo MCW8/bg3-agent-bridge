@@ -116,6 +116,72 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_find_template',
+        {
+            title: 'Search root templates',
+            description:
+                'Search the game\'s root templates — items, characters, scenery, projectiles — by name. Templates carry ' +
+                'cross-references that resources do not: Stats links to the stat entry, VisualTemplate to the visual GUID, ' +
+                'and ParentTemplateId to what it inherits from, so one search gives you the whole graph for an item. Use the ' +
+                'returned Id with bg3_preview_item to see it worn.',
+            inputSchema: z.object({
+                query: z.string().optional().describe('Case-insensitive substring matched against the template name, e.g. "ARM_Plate"'),
+                templateType: z
+                    .string()
+                    .optional()
+                    .describe('Restrict by type: item, character, scenery, projectile, light, trigger, prefab, decal, surface'),
+                limit: z.number().int().min(1).max(200).default(25).describe('Maximum returned; matches are counted in full'),
+                context: contextSchema,
+            }),
+        },
+        async ({ query, templateType, limit, context }) => bridge(context, 'template.find', { query, templateType, limit }),
+    );
+
+    defineTool(
+        server,
+        'bg3_preview_item',
+        {
+            title: 'Preview an item on a character',
+            description:
+                'Temporarily equip an item so its appearance can be seen, then put the original back. BG3 has no in-place ' +
+                'visual swap — writing an equipped item\'s visual does nothing — so the only way to see a look is to wear the ' +
+                'item. Note the preview is a REAL item carrying its own stats, not a cosmetic shell: previewing plate over ' +
+                'leather genuinely changes armour class, so avoid it mid-combat. The original is moved to inventory and ' +
+                'restored on `restore`. ALWAYS restore when done.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['apply', 'restore', 'status'])
+                    .default('status')
+                    .describe('apply equips the preview; restore puts the original back and deletes the temporary item'),
+                template: z.string().optional().describe('Root template UUID to preview, from bg3_find_template. Required for apply.'),
+                slot: z
+                    .string()
+                    .optional()
+                    .describe('Equipment slot, e.g. Breast, Helmet, Boots, Gloves, Cloak. Detected from the item when omitted.'),
+                character: z.string().optional().describe('Character UUID; defaults to the host character'),
+            }),
+        },
+        async ({ action, template, slot, character }) => {
+            if (action !== 'apply') {
+                return bridge('server', 'item.preview', { action, template, slot, character });
+            }
+
+            try {
+                // The equip is deferred 50ms inside the game, so a bare apply would
+                // always report equipped=false. Wait it out and report the settled
+                // state, so callers get one honest answer instead of two calls.
+                const applied = await callBridge('server', 'item.preview', { action, template, slot, character });
+                await new Promise((resolve) => setTimeout(resolve, 900));
+                const settled = await callBridge('server', 'item.preview', { action: 'status' });
+                return json({ applied, settled });
+            } catch (error) {
+                return failure((error as Error).message);
+            }
+        },
+    );
+
+    defineTool(
+        server,
         'bg3_capture_sounds',
         {
             title: 'Capture sounds the game fires',
