@@ -36,7 +36,9 @@ The `.lsx` is kept under `_source/` because LSF is binary and discards every com
 
 **Never compare Script Extender userdata against nil.** `entity.Vars ~= nil` raises *"attempt to call a nil value"* — the equality metamethod is not callable, though indexing is fine. Read through `pcall` instead.
 
-**Entity variables must be registered.** Without `Ext.Vars.RegisterUserVariable`, every access logs `Variable class '<name>' not registered` and reads back nil, so a guard built on one never trips and the item is re-granted on every level load. The options table is required, despite `ExtIdeHelpers.lua` declaring the function as taking only a name.
+**Entity variables must be registered.** Without `Ext.Vars.RegisterUserVariable`, every access logs `Variable class '<name>' not registered` and reads back nil, so a guard built on one never trips and the item is re-granted on every level load. The options table is required, despite `ExtIdeHelpers.lua` declaring the function as taking only a name — verified by calling both forms against the running game.
+
+**Checking whether an `Osi` function exists needs `type()`, not a comparison.** `Osi` entries are userdata (`OsiFunction(name)`), never Lua functions, so `type(Osi.X) == "function"` is false for every one of them including those that plainly work. `type(Osi.X) ~= "nil"` is the correct test — a missing name yields `nil`.
 
 ## Build and install
 

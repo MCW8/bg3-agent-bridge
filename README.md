@@ -165,7 +165,9 @@ bg3_preview_item action=apply template=b4c754d8-...   wear it
 bg3_preview_item action=restore                        put the original back
 ```
 
-**There is no in-place visual swap in BG3.** Writing an equipped item's `GameObjectVisual` changes the value and nothing else; `Osi.AddCustomVisualOverride` does not apply to equipment, and its removal counterpart is not bound at runtime under either spelling in `Osi.lua`. Shipped transmog mods work by *equipping a different item* — spawning the good-looking one, copying the original's stats onto it, and wearing that.
+**There is no in-place visual swap in BG3.** Writing an equipped item's `GameObjectVisual` changes the value and nothing renders differently; `Osi.AddCustomVisualOverride` exists and can be called, but has no visible effect on equipment. Shipped transmog mods work by *equipping a different item* — spawning the good-looking one, copying the original's stats onto it, and wearing that.
+
+Its counterpart is spelled `Osi.RemoveCustomVisualOvirride` — Larian's typo, not a documentation error, and the misspelled name is the one bound at runtime.
 
 `bg3_preview_item` does the light version of the same thing, since a preview does not have to stay playable. It spawns the template with `temporary=1`, equips it, moves the original to inventory, and restores on request. Two consequences worth knowing: the preview is a **real item with its own stats**, so previewing plate over leather genuinely changes armour class — don't do it mid-combat — and an un-restored preview leaves the original sitting in inventory.
 
