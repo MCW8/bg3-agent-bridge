@@ -8,6 +8,7 @@
  */
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -17,10 +18,39 @@ const here = path.dirname(fileURLToPath(import.meta.url));
 const packageRoot = path.resolve(here, '..', '..');
 const workspace = path.join(packageRoot, 'mod');
 
-const COMMON_DIVINE_LOCATIONS = [
-    'C:\\Program Files\\BG3 Modders Multitool\\Tools\\divine.exe',
-    'C:\\Program Files (x86)\\BG3 Modders Multitool\\Tools\\divine.exe',
-];
+/**
+ * Places divine plausibly lives. LSLib ships as a zip with no installer, so
+ * people extract it wherever they like — hence the spread of guesses, and why
+ * BG3_DIVINE_PATH exists as the reliable answer.
+ *
+ * Note the executable is `Divine.exe` in the LSLib release; Windows paths are
+ * case-insensitive so either spelling resolves.
+ */
+function divineCandidates(): string[] {
+    const roots = [
+        'C:\\Program Files\\BG3 Modders Multitool',
+        'C:\\Program Files (x86)\\BG3 Modders Multitool',
+        'C:\\Program Files\\LSLib',
+        'C:\\Program Files (x86)\\LSLib',
+        'C:\\LSLib',
+        'C:\\Divine',
+        'C:\\Tools\\LSLib',
+        path.join(homedir(), 'Downloads', 'LSLib'),
+        path.join(homedir(), 'Downloads', 'ExportTool'),
+        path.join(homedir(), 'Documents', 'LSLib'),
+        path.join(homedir(), 'LSLib'),
+    ];
+
+    const subdirs = ['', 'Tools', 'Packed', path.join('Tools', 'Packed')];
+    const candidates: string[] = [];
+
+    for (const root of roots) {
+        for (const sub of subdirs) {
+            candidates.push(path.join(root, sub, 'divine.exe'));
+        }
+    }
+    return candidates;
+}
 
 function findDivine(): string | null {
     const configured = process.env.BG3_DIVINE_PATH;
@@ -34,7 +64,7 @@ function findDivine(): string | null {
         if (first !== undefined) return first.trim();
     }
 
-    return COMMON_DIVINE_LOCATIONS.find((candidate) => existsSync(candidate)) ?? null;
+    return divineCandidates().find((candidate) => existsSync(candidate)) ?? null;
 }
 
 function main(): number {
@@ -49,8 +79,17 @@ function main(): number {
     if (divine === null) {
         console.error(
             'Could not find divine.exe (the LSLib CLI).\n\n' +
-                'Install BG3 Modders Multitool or LSLib, then either add divine.exe to PATH or set BG3_DIVINE_PATH to its full path.\n' +
-                'LSLib: https://github.com/Norbyte/lslib',
+                'You only need this to BUILD a pak. To just install the bridge, download the prebuilt\n' +
+                'BG3AgentBridge.pak from the Releases page and enable it in your mod manager instead.\n\n' +
+                'To build one yourself, get LSLib and point us at it:\n' +
+                '  1. Download ExportTool-vX.Y.Z.zip from https://github.com/Norbyte/lslib/releases\n' +
+                '  2. Extract it anywhere\n' +
+                '  3. set BG3_DIVINE_PATH=C:\\path\\to\\Tools\\divine.exe\n\n' +
+                'If you already use BG3 Modders Multitool, it bundles divine — set BG3_DIVINE_PATH to\n' +
+                "its Tools folder. Searched PATH and these locations:\n" +
+                divineCandidates()
+                    .map((candidate) => `  ${candidate}`)
+                    .join('\n'),
         );
         return 1;
     }
