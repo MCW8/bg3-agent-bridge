@@ -31,37 +31,25 @@ Writes are atomic (temp file plus rename) so neither side reads a half-written m
 
 - Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se)
 - Node.js 20+
-- `divine.exe` from [LSLib](https://github.com/Norbyte/lslib) (only to pack the companion mod)
+- A mod manager such as [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager)
+
+**You do not need `divine.exe` to install this.** It is only needed to build a `.pak`, and the release ships one prebuilt. See [Building your own mods](#building-your-own-mods) if you want it for your own work.
 
 ## Install
 
-**1. Build the server**
+**1. Install the mod half**
+
+Download `BG3AgentBridge.pak` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases), drop it in your `Mods` folder, enable **BG3 Agent Bridge** in your mod manager, and export the load order. Exactly like any other mod.
+
+The installer deliberately **never edits `modsettings.lsx` itself** — rewriting a load order in place is the easiest way to break an install, and the game rewrites that file from memory on exit, so edits made while it is running can vanish.
+
+**2. Install the server half**
 
 ```bash
+git clone https://github.com/MCW8/bg3-agent-bridge
+cd bg3-agent-bridge
 npm install && npm run build
 ```
-
-**2. Pack and place the companion mod**
-
-```bash
-npm run install-mod
-```
-
-This packs `mod/` into `BG3AgentBridge.pak` in your BG3 `Mods` directory. It deliberately **does not edit `modsettings.lsx`** — rewriting a load order in place is the easiest way to break an install, so enable "BG3 Agent Bridge" in your own mod manager and export the order as usual.
-
-Set `BG3_DIVINE_PATH` if `divine.exe` is not on your `PATH`.
-
-<details>
-<summary><strong>Testing without packing (no divine required)</strong></summary>
-
-The engine loads loose module folders out of the game's own `Data\Mods\` directory — that is where Larian's `GustavDev` and `SharedDev` live. For development you can skip `divine` entirely:
-
-1. Copy `mod\Mods\BG3AgentBridge` to `<BG3 install>\Data\Mods\BG3AgentBridge`
-2. Add a `ModuleShortDesc` entry for it to `modsettings.lsx` (back that file up first)
-
-Edits to the Lua then apply on the next `bg3_reload` with no repack step at all. Pack to a `.pak` when you are ready to distribute.
-
-</details>
 
 **3. Point your MCP client at it**
 
@@ -70,13 +58,40 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
   "mcpServers": {
     "bg3-agent-bridge": {
       "command": "node",
-      "args": ["D:/path/to/BG3ToolKitMCP/dist/index.js"]
+      "args": ["C:/full/path/to/bg3-agent-bridge/dist/index.js"]
     }
   }
 }
 ```
 
+An absolute path is the reliable form. The repo's own `.mcp.json` uses a relative one, which works when the client launches the server from the project root.
+
 **4. Verify** — launch the game, load a save, then call `bg3_bridge_status`.
+
+<details>
+<summary><strong>Running loose instead, for faster iteration</strong></summary>
+
+The engine loads loose module folders from the game's own `Data\Mods\` directory — that is where Larian's `GustavDev` and `SharedDev` live. Skipping the pak means edited Lua applies on the next `bg3_reload` with no rebuild:
+
+1. Copy `mod\Mods\BG3AgentBridge` to `<BG3 install>\Data\Mods\BG3AgentBridge`
+2. Add a `ModuleShortDesc` entry for it to `modsettings.lsx`, **with the game closed**
+
+A packed mod's Lua cannot be hot-reloaded — the pak is read at startup, so `bg3_reload` re-reads the same bytes.
+
+</details>
+
+## Building your own mods
+
+Only relevant once you are making mods rather than just running this. You need `divine.exe`, the LSLib CLI:
+
+1. Download `ExportTool-vX.Y.Z.zip` from [LSLib releases](https://github.com/Norbyte/lslib/releases) and extract it anywhere
+2. `set BG3_DIVINE_PATH=C:\path\to\Tools\divine.exe`
+
+[BG3 Modders Multitool](https://github.com/ShinyHobo/BG3-Modders-Multitool) bundles divine, so point `BG3_DIVINE_PATH` at its `Tools` folder if you already use it. `npm run install-mod` searches `PATH` and the usual extract locations, and lists everywhere it looked if it comes up empty.
+
+It is not vendored here deliberately: LSLib tracks game patches, so a bundled copy would go stale exactly when a new patch lands, and shipping someone else's binary would put its integrity on this repo rather than upstream.
+
+The `examples/` directory has two worked mods — a spell and an item — each with build commands and the mistakes worth avoiding.
 
 ## Tools
 
