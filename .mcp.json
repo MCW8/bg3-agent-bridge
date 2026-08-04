@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "bg3-agent-bridge": {
+      "command": "node",
+      "args": ["D:\\ClaudeProjects\\_ToolsProjects\\BG3ToolKitMCP\\dist\\index.js"]
+    }
+  }
+}
