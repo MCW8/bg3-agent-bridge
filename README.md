@@ -101,7 +101,9 @@ Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_DIVINE_
 
 **Round trips cost about a second.** The mod polls every 30 ticks. One poll costs Script Extender 7-9ms, enough that it is flagged as a slow event, so polling faster trades frame time for latency that agent workflows do not need.
 
-**Hot reload only covers Lua.** `bg3_reload` reinitialises the Lua VM, so edited scripts take effect immediately. Changes to packed data — stats, root templates, localization — still need a repack and a restart.
+**Hot reload only covers Lua, and it is not per-context.** `bg3_reload` reinitialises the Lua VM, so edited scripts take effect immediately. Changes to packed data — stats, root templates, localization — still need a repack and a restart. `Ext.Debug.Reset()` restarts **both** the server and client VMs no matter which context asks, so all in-memory Lua state goes with it, including runtime edits made through `bg3_stats_set`. The `context` argument picks the transport, not the scope.
+
+**`bg3_eval` does not run inside your mod's sandbox.** Chunks compile into the default global table, so `Ext`, `Osi`, and `Mods` are all reachable but a mod's own bare globals are not. Reach mod state through `Mods.<ModTable>` instead.
 
 **The loop is slower than Unity's.** The game takes about a minute to boot and needs a loaded save. Keep one instance alive and iterate against it rather than restarting per change. The `client` context only answers once a save is loaded; `server` is the right default for almost everything.
 

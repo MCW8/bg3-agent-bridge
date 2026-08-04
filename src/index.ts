@@ -216,15 +216,22 @@ function registerTools(server: McpServer): void {
             title: 'Hot-reload the Lua VM',
             description:
                 'Reinitialise the Lua state so edited mod Lua takes effect without restarting the game. This is the fast half of ' +
-                'the edit-test loop; changes to packed data such as stats or root templates still need a repack and restart.',
-            inputSchema: z.object({ context: contextSchema }),
+                'the edit-test loop; changes to packed data such as stats or root templates still need a repack and restart. ' +
+                'Note this resets BOTH the server and client VMs whichever context you target — all in-memory Lua state is lost, ' +
+                'including runtime stat edits made with bg3_stats_set.',
+            inputSchema: z.object({
+                context: contextSchema.describe(
+                    'Which context carries the request. It does not scope the reset — both VMs restart either way.',
+                ),
+            }),
         },
         async ({ context }) => {
             const result = await bridge(context, 'reset');
             if (result.isError === true) return result;
             return text(
-                `Lua VM reset scheduled for the ${context} context. Give it a moment, then call bg3_read_log to see whether ` +
-                    `your scripts reloaded cleanly.`,
+                `Lua VM reset scheduled (requested via the ${context} context; both server and client VMs restart). ` +
+                    `Give it a moment, then call bg3_read_log with namePattern "Extender Runtime" to see whether your ` +
+                    `scripts reloaded cleanly.`,
             );
         },
     );
