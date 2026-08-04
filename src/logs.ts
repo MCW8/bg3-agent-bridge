@@ -58,6 +58,7 @@ export interface TailOptions {
     lines?: number;
     filter?: string;
     file?: string;
+    namePattern?: string;
 }
 
 export interface TailResult {
@@ -75,7 +76,17 @@ export async function tailLog(options: TailOptions = {}): Promise<TailResult> {
 
     let target = options.file;
     if (target === undefined) {
-        const candidates = await listLogFiles();
+        let candidates = await listLogFiles();
+
+        // Script Extender writes several logs concurrently. "Newest" is often an
+        // Osiris runtime log while Lua output and script errors are in the
+        // Extender runtime log, so callers need a way to say which they mean.
+        if (options.namePattern !== undefined && options.namePattern !== '') {
+            const wanted = options.namePattern.toLowerCase();
+            const narrowed = candidates.filter((entry) => path.basename(entry.file).toLowerCase().includes(wanted));
+            if (narrowed.length > 0) candidates = narrowed;
+        }
+
         target = candidates[0]?.file;
     }
 

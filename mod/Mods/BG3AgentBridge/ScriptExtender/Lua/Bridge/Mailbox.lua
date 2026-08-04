@@ -84,6 +84,15 @@ end
 
 --- Entry point, called from the context bootstrap.
 function Bridge.Start(context)
+    -- Bootstrap can be loaded more than once in a session. A reset gives a fresh
+    -- VM so this is normally moot, but subscribing twice in one VM would run
+    -- every poll twice, so refuse politely.
+    if Bridge.started then
+        Bridge.log("Start(" .. tostring(context) .. ") ignored — already running in this VM")
+        return
+    end
+    Bridge.started = true
+
     Bridge.context = context
     Bridge.paths_ = Bridge.paths(context)
     Bridge.capabilities = Bridge.probeCapabilities()

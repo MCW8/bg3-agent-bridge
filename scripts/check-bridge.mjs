@@ -37,8 +37,8 @@ if (anyOnline) {
     }
 }
 
-console.log('\n--- bridge lines in the newest log ---');
-const log = await tailLog({ lines: 15, filter: 'AgentBridge|BG3AgentBridge' });
+console.log('\n--- bridge lines in the newest Extender log ---');
+const log = await tailLog({ lines: 15, filter: 'AgentBridge|BG3AgentBridge', namePattern: 'Extender Runtime' });
 console.log(log.file ?? '(no log found)');
 console.log(log.matched === 0 ? '(no bridge output yet)' : log.lines.join('\n'));
 
