@@ -135,8 +135,9 @@ function registerTools(server: McpServer): void {
                     .string()
                     .optional()
                     .describe(
-                        'Where to play it: a built-in sound object (Global, Music, Ambient, HUD, Listener) or an entity UUID ' +
-                            'to play positionally at that character. Omit for the default object.',
+                        'Where to play it. Prefer a character UUID — most game sounds are positional, and firing one at a ' +
+                            'built-in object leaves it nowhere near the listener, so it returns success and you hear nothing. ' +
+                            'Built-ins (Global, Music, Ambient, HUD, Listener) suit only wide-falloff sounds. Omit for the default object.',
                     ),
                 stop: z
                     .boolean()

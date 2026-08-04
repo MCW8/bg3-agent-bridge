@@ -194,9 +194,39 @@ H["audio.post"] = function(params)
         error("PostEvent failed: " .. tostring(posted))
     end
 
-    -- PostEvent returns false for an event Wwise does not know, which is the
-    -- usual symptom of a misspelled SoundEvent name.
-    return { posted = posted, loaded = loaded, event = event, target = label }
+    local result = { posted = posted, loaded = loaded, event = event, target = label }
+
+    -- posted=true only means Wwise accepted the event, not that anything was
+    -- audible. Most game sounds are positional, and firing one at a built-in
+    -- object puts it nowhere near the listener — silence with a success
+    -- response, which is a miserable thing to debug. Only worth the lookup
+    -- when the target was not an entity, since that is the failing case.
+    if type(object) ~= "userdata" then
+        local okFind, info = pcall(function()
+            for _, guid in ipairs(Ext.Resource.GetAll("Sound")) do
+                local r = Ext.Resource.Get(guid, "Sound")
+                if r ~= nil and r.SoundEvent == event then
+                    return { MaxDistance = r.MaxDistance, Duration = r.Duration, Guid = tostring(r.Guid) }
+                end
+            end
+            return nil
+        end)
+
+        if okFind and info ~= nil then
+            result.maxDistance = info.MaxDistance
+            result.duration = info.Duration
+            result.guid = info.Guid
+
+            if type(info.MaxDistance) == "number" and info.MaxDistance > 0 and info.MaxDistance < 100 then
+                result.warning = "This event is positional (MaxDistance " .. tostring(info.MaxDistance)
+                    .. ") and was played on the " .. label .. " sound object, so it is probably inaudible. "
+                    .. "Pass target=<character UUID> to hear it. Note also that foley events are often gated on "
+                    .. "Wwise switches such as surface material, and resolve to little or nothing without them."
+            end
+        end
+    end
+
+    return result
 end
 
 H["resource.find"] = function(params)
