@@ -218,11 +218,18 @@ function registerTools(server: McpServer): void {
                     .optional()
                     .describe('Case-insensitive regular expression; use your mod name or "error" to cut noise'),
                 file: z.string().optional().describe('Absolute path to a specific log file; omit to use the newest'),
+                namePattern: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Substring of the log filename to pick which log to read. Script Extender writes several at once — ' +
+                            'use "Extender Runtime" for Lua output and script errors, "Osiris" for story/rule logs.',
+                    ),
             }),
         },
-        async ({ lines, filter, file }) => {
+        async ({ lines, filter, file, namePattern }) => {
             try {
-                const result = await tailLog({ lines, filter, file });
+                const result = await tailLog({ lines, filter, file, namePattern });
                 if (result.file === null) {
                     return failure(
                         `No log files found. Searched: ${logDirectories().join(', ') || '(no known log directory exists)'}. ` +
