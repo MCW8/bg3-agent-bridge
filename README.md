@@ -85,6 +85,7 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
 | `bg3_bridge_status` | Is the game running with the bridge loaded, and what does each context support |
 | `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
 | `bg3_find_resource` | Search sounds, visuals, materials and effects by name to get their GUIDs |
+| `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
 | `bg3_eval` | Run a Lua chunk in the live game and get its return values |
 | `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` |
 | `bg3_entity_inspect` | List an entity's components, or dump one by name |
@@ -110,7 +111,18 @@ bg3_find_resource type=Visual query=barbarian
 
 Sounds carry a readable `SoundEvent`; visuals carry `Slot`, `Template` and `SkeletonResource`; `moddedOnly` narrows to what a mod added. Scans are whole-bank — roughly 160ms across 24k sounds and 740ms across 60k visuals, which is a brief but real hitch in the running game, so prefer a narrow `query`.
 
-There is no way to capture a sound that just played: `Ext.Audio` exposes `PostEvent`, `SetState` and `SetSwitch` — it fires audio, it does not observe it. The practical loop is to search by name, then play candidates back to confirm.
+There is no way to capture a sound that just played: `Ext.Audio` exposes `PostEvent`, `SetState` and `SetSwitch` — it fires audio, it does not observe it. So the loop is search, then audition:
+
+```
+bg3_find_resource type=Sound query=thunderwave     -> SoundEvent name
+bg3_play_sound    event=Spell_Cast_Damage_Thunder_Thunderwave_L1to3_01
+bg3_play_sound    event=... target=<character UUID>   -- positional, at that character
+bg3_play_sound    target=Global stop=true             -- if a looping event will not end
+```
+
+`target` takes a built-in sound object — `Global`, `Music`, `Ambient`, `HUD`, `Listener` — or an entity UUID to play positionally. Those names were found by probing, since the engine rejects unknown ones and exposes no enum to list them; other plausible names (`UI`, `Camera`, `Player`, `World`) are not valid. A misspelled event returns `posted: false` rather than raising, which is how you tell "Wwise does not know this event" from "the call failed".
+
+**`bg3_play_sound` is a development tool, not a player-facing feature.** It fires when the tool is called from outside the game; nothing is bound to input and the person playing gets no control from it. Letting a player trigger sounds at will is a mod — the same `Ext.Audio.PostEvent` call, bound to a spell, item or console command.
 
 ## Known limits
 

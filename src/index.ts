@@ -116,6 +116,41 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_play_sound',
+        {
+            title: 'Play a sound in the running game',
+            description:
+                'Fire a Wwise sound event, to audition a sound you found with bg3_find_resource. This is a development tool ' +
+                'driven from outside the game — it plays when this tool is called and gives the person playing no control of ' +
+                'its own. Always runs in the client context, because Ext.Audio is client side only.',
+            inputSchema: z.object({
+                event: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'SoundEvent name, e.g. "Spell_Cast_Damage_Thunder_Thunderwave_L1to3_01". Take these from the ' +
+                            'SoundEvent field of bg3_find_resource with type=Sound. Required unless stop is true.',
+                    ),
+                target: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Where to play it: a built-in sound object (Global, Music, Ambient, HUD, Listener) or an entity UUID ' +
+                            'to play positionally at that character. Omit for the default object.',
+                    ),
+                stop: z
+                    .boolean()
+                    .default(false)
+                    .describe('Stop sounds on the target instead of playing one. Use this when a looping event will not end on its own.'),
+            }),
+        },
+        // Hardcoded to client: Ext.Audio does not exist server side, so offering
+        // a context argument would only offer a way to get an error.
+        async ({ event, target, stop }) => bridge('client', 'audio.post', { event, target, stop }),
+    );
+
+    defineTool(
+        server,
         'bg3_find_resource',
         {
             title: 'Search game resources',

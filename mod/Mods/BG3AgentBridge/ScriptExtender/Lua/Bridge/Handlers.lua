@@ -114,6 +114,91 @@ local function resourceBankNames()
     return names
 end
 
+--- Sound objects PostEvent will accept by name. Found by probing: the engine
+--- rejects anything else with "Unknown built-in sound object name", and there
+--- is no enum to enumerate them, so this list is verified rather than
+--- exhaustive. An entity handle or nil are also valid.
+local BUILTIN_SOUND_OBJECTS = {
+    Global = true,
+    Music = true,
+    Ambient = true,
+    HUD = true,
+    Listener = true,
+}
+
+local function builtinSoundObjectList()
+    local names = {}
+    for name in pairs(BUILTIN_SOUND_OBJECTS) do
+        names[#names + 1] = name
+    end
+    table.sort(names)
+    return table.concat(names, ", ")
+end
+
+--- Resolve `target` to something PostEvent accepts: a built-in name, an entity
+--- handle, or nil for the default object.
+local function resolveSoundObject(target)
+    if type(target) ~= "string" or target == "" then
+        return nil
+    end
+    if BUILTIN_SOUND_OBJECTS[target] then
+        return target
+    end
+
+    local ok, entity = pcall(function()
+        return Ext.Entity.Get(target)
+    end)
+    if not ok or entity == nil then
+        error("target must be an entity UUID or one of: " .. builtinSoundObjectList())
+    end
+    return entity
+end
+
+H["audio.post"] = function(params)
+    if Ext.Audio == nil then
+        error("Ext.Audio is unavailable — audio is client side only, so this has to run in the client context")
+    end
+
+    local object = resolveSoundObject(params.target)
+    local label = params.target
+    if type(label) ~= "string" or label == "" then
+        label = "<default>"
+    end
+
+    if params.stop == true then
+        local ok, result = pcall(function()
+            return Ext.Audio.Stop(object)
+        end)
+        if not ok then
+            error("Stop failed: " .. tostring(result))
+        end
+        return { stopped = true, target = label, result = result }
+    end
+
+    local event = params.event
+    if type(event) ~= "string" or event == "" then
+        error("params.event is required — a SoundEvent name, e.g. from bg3_find_resource with type=Sound")
+    end
+
+    -- Cheap and idempotent; some events will not fire until their bank entry has
+    -- been loaded, and loading an already loaded event is harmless.
+    local loaded = false
+    pcall(function()
+        loaded = Ext.Audio.LoadEvent(event) == true
+    end)
+
+    local ok, posted = pcall(function()
+        return Ext.Audio.PostEvent(object, event)
+    end)
+    if not ok then
+        error("PostEvent failed: " .. tostring(posted))
+    end
+
+    -- PostEvent returns false for an event Wwise does not know, which is the
+    -- usual symptom of a misspelled SoundEvent name.
+    return { posted = posted, loaded = loaded, event = event, target = label }
+end
+
 H["resource.find"] = function(params)
     local bank = params.type
     if type(bank) ~= "string" or bank == "" then
