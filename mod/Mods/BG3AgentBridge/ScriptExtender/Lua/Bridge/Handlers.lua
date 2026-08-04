@@ -75,6 +75,112 @@ local function dependencyNames(mod)
     return names
 end
 
+--- Flatten a resource to its scalar fields, and build the lowercased haystack
+--- that `query` is matched against.
+---
+--- Deliberately generic: iterating whatever the resource exposes means new or
+--- unfamiliar banks work without a per-bank field list, and every string field
+--- becomes searchable. For Sound that means SoundEvent; for Visual, Slot and
+--- SkeletonResource; for everything, Guid and SourceFile.
+local function summarizeResource(resource, guid)
+    local entry = { Guid = tostring(guid) }
+    local haystack = { string.lower(tostring(guid)) }
+
+    pcall(function()
+        for key, value in pairs(resource) do
+            local t = type(value)
+            if t == "string" then
+                entry[key] = value
+                haystack[#haystack + 1] = string.lower(value)
+            elseif t == "number" or t == "boolean" then
+                entry[key] = value
+            end
+        end
+    end)
+
+    return entry, table.concat(haystack, " ")
+end
+
+local function resourceBankNames()
+    local names = {}
+    pcall(function()
+        for k, v in pairs(Ext.Enums.ResourceBankType) do
+            if type(k) == "string" then
+                names[#names + 1] = k
+            end
+        end
+    end)
+    table.sort(names)
+    return names
+end
+
+H["resource.find"] = function(params)
+    local bank = params.type
+    if type(bank) ~= "string" or bank == "" then
+        error("params.type is required, e.g. \"Sound\", \"Visual\", \"CharacterVisual\". Valid: "
+            .. table.concat(resourceBankNames(), ", "))
+    end
+
+    local okAll, all = pcall(function()
+        return Ext.Resource.GetAll(bank)
+    end)
+    if not okAll or type(all) ~= "table" then
+        error("unknown or unavailable resource type: " .. tostring(bank)
+            .. ". Valid: " .. table.concat(resourceBankNames(), ", "))
+    end
+
+    local needle = params.query
+    if type(needle) == "string" and needle ~= "" then
+        needle = string.lower(needle)
+    else
+        needle = nil
+    end
+
+    local limit = tonumber(params.limit) or 25
+    if limit < 1 then
+        limit = 1
+    elseif limit > 200 then
+        limit = 200
+    end
+
+    local moddedOnly = params.moddedOnly == true
+    local clock = Ext.Utils ~= nil and Ext.Utils.MonotonicTime or nil
+    local started = clock and clock() or nil
+
+    local results, matched = {}, 0
+
+    for _, guid in ipairs(all) do
+        local ok, resource = pcall(function()
+            return Ext.Resource.Get(guid, bank)
+        end)
+
+        if ok and resource ~= nil then
+            local entry, haystack = summarizeResource(resource, guid)
+            local keep = (needle == nil or string.find(haystack, needle, 1, true) ~= nil)
+                and (not moddedOnly or entry.IsModded == true)
+
+            if keep then
+                -- Counting past the limit is nearly free and tells the caller
+                -- whether to narrow the query rather than guess.
+                matched = matched + 1
+                if #results < limit then
+                    results[#results + 1] = entry
+                end
+            end
+        end
+    end
+
+    return {
+        type = bank,
+        scanned = #all,
+        matched = matched,
+        returned = #results,
+        truncated = matched > #results,
+        elapsedMs = started and (clock() - started) or nil,
+        resources = results,
+    }
+end
+
 H["mods.list"] = function(params)
     local order = Ext.Mod.GetLoadOrder()
 

@@ -84,6 +84,7 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
 |---|---|
 | `bg3_bridge_status` | Is the game running with the bridge loaded, and what does each context support |
 | `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
+| `bg3_find_resource` | Search sounds, visuals, materials and effects by name to get their GUIDs |
 | `bg3_eval` | Run a Lua chunk in the live game and get its return values |
 | `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` |
 | `bg3_entity_inspect` | List an entity's components, or dump one by name |
@@ -93,6 +94,23 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
 | `bg3_list_logs` | List available log files, newest first |
 
 Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_DIVINE_PATH`.
+
+## Finding asset GUIDs
+
+`bg3_find_resource` searches the loaded resource banks directly, so you can go from a half-remembered name to a GUID without unpacking anything. Every string field is searchable, including `SourceFile`, so searching by `.bnk` or pak name works too.
+
+```
+bg3_find_resource type=Sound  query=thunderwave
+  Spell_Cast_Damage_Thunder_Thunderwave_L1to3_01   bdf50f4b-d321-688e-5bfd-c0fe24dcc118
+
+bg3_find_resource type=Visual query=barbarian
+  slot=Body      HUM_M_ARM_Barbarian_A_Pants           62e808d4-ebf1-3311-20b3-192e2bd71e71
+  slot=Footwear  GTY_M_ARM_BarbarianMagical_A_Footwear  25587081-9fd5-64dc-fdec-760a0dab50e5
+```
+
+Sounds carry a readable `SoundEvent`; visuals carry `Slot`, `Template` and `SkeletonResource`; `moddedOnly` narrows to what a mod added. Scans are whole-bank — roughly 160ms across 24k sounds and 740ms across 60k visuals, which is a brief but real hitch in the running game, so prefer a narrow `query`.
+
+There is no way to capture a sound that just played: `Ext.Audio` exposes `PostEvent`, `SetState` and `SetSwitch` — it fires audio, it does not observe it. The practical loop is to search by name, then play candidates back to confirm.
 
 ## Known limits
 

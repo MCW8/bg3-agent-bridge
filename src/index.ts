@@ -116,6 +116,39 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_find_resource',
+        {
+            title: 'Search game resources',
+            description:
+                'Search a resource bank by substring and get GUIDs back. This is how you find the UUID of a sound, visual, ' +
+                'material or effect without unpacking anything. Sound entries carry a readable SoundEvent name (e.g. ' +
+                '"CrSpell_Cast_Sahuagin_Net"), visuals carry Slot and SkeletonResource, and everything carries SourceFile — ' +
+                'so you can search by asset name, by slot, or by the .bnk/pak a resource came from. The query matches every ' +
+                'string field including the GUID itself, case-insensitively.',
+            inputSchema: z.object({
+                type: z
+                    .string()
+                    .min(1)
+                    .describe(
+                        'Resource bank: Sound, Visual, CharacterVisual, Material, MaterialPreset, MaterialSet, Effect, ' +
+                            'VoiceBark, Texture, Animation, Skeleton, Dialog, Timeline, TileSet, VirtualTexture, and others. ' +
+                            'An invalid value returns the full list of valid ones.',
+                    ),
+                query: z
+                    .string()
+                    .optional()
+                    .describe('Case-insensitive substring. Omit to sample the bank and see what fields entries carry.'),
+                limit: z.number().int().min(1).max(200).default(25).describe('Maximum entries returned; matches are counted in full regardless'),
+                moddedOnly: z.boolean().default(false).describe('Only resources flagged IsModded — useful for isolating what a mod added'),
+                context: contextSchema,
+            }),
+        },
+        async ({ type, query, limit, moddedOnly, context }) =>
+            bridge(context, 'resource.find', { type, query, limit, moddedOnly }),
+    );
+
+    defineTool(
+        server,
         'bg3_list_mods',
         {
             title: 'List loaded mods',
