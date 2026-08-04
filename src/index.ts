@@ -140,11 +140,24 @@ function registerTools(server: McpServer): void {
                 'then request a specific one — full component dumps are large.',
             inputSchema: z.object({
                 id: z.string().min(1).describe('Entity UUID or handle, e.g. a character UUID'),
-                component: z.string().optional().describe('Component name to dump; omit to list all component names'),
+                component: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Component to dump; omit to list all component names. Either the qualified name from that list ' +
+                            '("eoc::HealthComponent") or the short form ("Health") works.',
+                    ),
+                depth: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(10)
+                    .optional()
+                    .describe('Serialization depth, default 3. Raise carefully — deep walks stall the game briefly.'),
                 context: contextSchema,
             }),
         },
-        async ({ id, component, context }) => bridge(context, 'entity.get', { id, component }),
+        async ({ id, component, depth, context }) => bridge(context, 'entity.get', { id, component, depth }),
     );
 
     defineTool(
@@ -157,11 +170,24 @@ function registerTools(server: McpServer): void {
                 'instead of the whole entry.',
             inputSchema: z.object({
                 name: z.string().min(1).describe('Stat entry name, e.g. "Target_MainHandAttack"'),
-                attribute: z.string().optional().describe('Single attribute to read; omit for the full entry'),
+                attribute: z
+                    .string()
+                    .optional()
+                    .describe('Single attribute to read. Much cheaper than a full entry — prefer this when you know the field.'),
+                depth: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(10)
+                    .optional()
+                    .describe(
+                        'Serialization depth for a full entry, default 2. Large entries such as spells follow a long ' +
+                            'inheritance chain, and a deep walk can stall the game for seconds.',
+                    ),
                 context: contextSchema,
             }),
         },
-        async ({ name, attribute, context }) => bridge(context, 'stats.get', { name, attribute }),
+        async ({ name, attribute, depth, context }) => bridge(context, 'stats.get', { name, attribute, depth }),
     );
 
     defineTool(

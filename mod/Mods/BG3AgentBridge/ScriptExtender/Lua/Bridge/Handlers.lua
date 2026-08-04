@@ -8,6 +8,43 @@ local Bridge = BG3AgentBridge
 Bridge.Handlers = {}
 local H = Bridge.Handlers
 
+--- GetAllComponentNames returns fully qualified names ("eoc::HealthComponent")
+--- but the entity indexer wants the short form ("Health"), so discovery and
+--- fetch disagree unless the name is normalised. Ordered most to least literal.
+function Bridge.componentAliases(name)
+    local seen, aliases = {}, {}
+    local function add(value)
+        if value ~= nil and value ~= "" and not seen[value] then
+            seen[value] = true
+            aliases[#aliases + 1] = value
+        end
+    end
+
+    add(name)
+    local short = string.match(name, "::([%w_]+)$")
+    add(short)
+    add((string.gsub(name, "Component$", "")))
+    if short ~= nil then
+        add((string.gsub(short, "Component$", "")))
+    end
+
+    return aliases
+end
+
+--- Indexing an unknown component raises rather than returning nil, so each
+--- candidate needs its own pcall.
+function Bridge.resolveComponent(entity, name)
+    for _, alias in ipairs(Bridge.componentAliases(name)) do
+        local ok, component = pcall(function()
+            return entity[alias]
+        end)
+        if ok and component ~= nil then
+            return component, alias
+        end
+    end
+    return nil, nil
+end
+
 H["ping"] = function()
     return {
         pong = true,
@@ -63,14 +100,16 @@ H["entity.get"] = function(params)
     -- A single named component keeps the payload small; the component list is
     -- the discovery step an agent runs first.
     if params.component ~= nil and params.component ~= "" then
-        local component = entity[params.component]
-        if component == nil and type(entity.GetComponent) == "function" then
-            component = entity:GetComponent(params.component)
-        end
+        local component, resolved = Bridge.resolveComponent(entity, params.component)
         if component == nil then
-            error("entity has no component named: " .. tostring(params.component))
+            error(
+                "entity has no component named: " .. tostring(params.component)
+                    .. " (tried " .. table.concat(Bridge.componentAliases(params.component), ", ") .. ")"
+            )
         end
-        return { id = tostring(id), component = params.component, data = component }
+
+        Bridge.responseDepth = tonumber(params.depth)
+        return { id = tostring(id), component = resolved, requested = params.component, data = component }
     end
 
     if type(entity.GetAllComponentNames) ~= "function" then
@@ -103,6 +142,11 @@ H["stats.get"] = function(params)
         }
     end
 
+    -- Measured live: some entries (spells especially) follow an inheritance
+    -- chain long enough to stall the Lua state for seconds, and lowering depth
+    -- makes them fail outright rather than return less. Reading a single
+    -- attribute is the fast, reliable path for those.
+    Bridge.responseDepth = tonumber(params.depth)
     return { name = name, stat = stat }
 end
 
