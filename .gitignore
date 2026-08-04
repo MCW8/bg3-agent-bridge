@@ -1,0 +1,13 @@
+node_modules/
+dist/
+*.tsbuildinfo
+*.log
+
+# Machine-local Claude Code state
+.claude/settings.local.json
+
+# Never commit extracted game data or built packages — Larian's Toolkit EULA
+# forbids redistributing Toolkit output and game assets.
+*.pak
+/gamedata/
+/unpacked/

@@ -1,0 +1,42 @@
+{
+  "name": "bg3-agent-bridge-mcp",
+  "version": "0.1.0",
+  "description": "MCP server giving AI coding agents a live feedback loop into Baldur's Gate 3 via the Script Extender",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "bin": {
+    "bg3-agent-bridge-mcp": "dist/index.js"
+  },
+  "files": [
+    "dist",
+    "mod",
+    "README.md",
+    "LICENSE"
+  ],
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "baldurs-gate-3",
+    "bg3",
+    "script-extender",
+    "modding"
+  ],
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "typecheck": "tsc --noEmit",
+    "start": "node dist/index.js",
+    "install-mod": "node dist/cli/install-mod.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/server": "^2.0.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.2",
+    "typescript": "^7.0.2"
+  }
+}
