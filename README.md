@@ -173,6 +173,18 @@ Its counterpart is spelled `Osi.RemoveCustomVisualOvirride` — Larian's typo, n
 
 Slot detection reads the item's `Equipable.Slot`, which reports `Breast`. `Osi.GetEquipmentSlotForItem` returns an enum index (`1`) that `GetEquippedItem` will not accept.
 
+## On the reference dumps
+
+Measured against SE v32, not assumed:
+
+- **Existence data is trustworthy.** `pairs(Osi)` enumerates 1303 names; `Osi.lua` declares 983 and `Osi.Events.lua` 320, summing exactly, with nothing declared-but-absent and nothing runtime-but-undocumented. Those files were 16 months old and still correct.
+- **Signatures are not.** `Ext.Vars.RegisterUserVariable` is declared as taking a name alone; calling it that way fails, because the options table is required. Regenerating does not help — `Ext.Types.GenerateIdeHelpers` produces the same wrong signature, since the generator cannot express optional parameters. Only calling a function settles its shape, which `bg3_eval` makes cheap.
+- **`Ext.Osiris.RegisterListener` is missing** from generated helpers entirely, so LaughingLeader's separate file for it stays necessary.
+
+`Ext.Types.GenerateIdeHelpers("Helpers.lua")` still earns its place for *coverage* — it writes a build-exact file to the Script Extender directory, roughly 950 lines larger than a three-month-old copy.
+
+Checking whether an `Osi` function exists needs `type(Osi.X) ~= "nil"`. Entries are userdata (`OsiFunction(name)`), never Lua functions, so `type(Osi.X) == "function"` is false for every one of them — a check that will convince you a working function is missing.
+
 ## Known limits
 
 **`bg3_eval` depends on a capability that is not guaranteed.** `load()` is not *documented* as exposed to mod scripts, though it was present on the build this was developed against. The mod probes at boot and reports through `bg3_bridge_status`, so if it is missing you get a clear message rather than a silent failure. Note that Script Extender's `load` takes an environment table as its second argument, not standard Lua's chunk-name string. The structured tools do not depend on any of this.
