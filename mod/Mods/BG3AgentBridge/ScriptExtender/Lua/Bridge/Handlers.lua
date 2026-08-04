@@ -367,6 +367,91 @@ H["audio.post"] = function(params)
     return result
 end
 
+H["template.find"] = function(params)
+    local all = Ext.Template.GetAllRootTemplates()
+
+    local needle = params.query
+    if type(needle) == "string" and needle ~= "" then
+        needle = string.lower(needle)
+    else
+        needle = nil
+    end
+
+    local wantType = params.templateType
+    if type(wantType) ~= "string" or wantType == "" then
+        wantType = nil
+    end
+
+    local limit = tonumber(params.limit) or 25
+    if limit < 1 then
+        limit = 1
+    elseif limit > 200 then
+        limit = 200
+    end
+
+    local clock = Ext.Utils ~= nil and Ext.Utils.MonotonicTime or nil
+    local started = clock and clock() or nil
+
+    local results, matched, scanned = {}, 0, 0
+
+    -- Fields worth carrying back. Stats and VisualTemplate are the useful ones:
+    -- they turn a name you half-remember into the stat entry and the visual GUID
+    -- in a single lookup.
+    local fields = { "Name", "TemplateType", "Stats", "Icon", "VisualTemplate", "ParentTemplateId", "EquipmentTypeID" }
+
+    for _, template in pairs(all) do
+        scanned = scanned + 1
+
+        local name, templateType
+        pcall(function()
+            name = tostring(template.Name)
+        end)
+        pcall(function()
+            templateType = tostring(template.TemplateType)
+        end)
+
+        local typeOk = wantType == nil or (templateType ~= nil and string.lower(templateType) == string.lower(wantType))
+        local nameOk = needle == nil or (name ~= nil and string.find(string.lower(name), needle, 1, true) ~= nil)
+
+        if typeOk and nameOk then
+            matched = matched + 1
+            if #results < limit then
+                local entry = {}
+                pcall(function()
+                    entry.Id = tostring(template.Id)
+                end)
+                for _, key in ipairs(fields) do
+                    local ok, value = pcall(function()
+                        return template[key]
+                    end)
+                    if ok and value ~= nil then
+                        local t = type(value)
+                        if t == "string" or t == "number" or t == "boolean" then
+                            entry[key] = value
+                        else
+                            local text = tostring(value)
+                            -- skip opaque userdata addresses, keep real ids
+                            if not string.find(text, "(0000", 1, true) then
+                                entry[key] = text
+                            end
+                        end
+                    end
+                end
+                results[#results + 1] = entry
+            end
+        end
+    end
+
+    return {
+        scanned = scanned,
+        matched = matched,
+        returned = #results,
+        truncated = matched > #results,
+        elapsedMs = started and (clock() - started) or nil,
+        templates = results,
+    }
+end
+
 H["resource.find"] = function(params)
     local bank = params.type
     if type(bank) ~= "string" or bank == "" then
@@ -476,6 +561,164 @@ H["mods.list"] = function(params)
     end
 
     return { total = #order, returned = #mods, mods = mods }
+end
+
+--- Temporary appearance preview.
+---
+--- BG3 has no in-place visual swap: writing an equipped item's GameObjectVisual
+--- does nothing, and Osi.AddCustomVisualOverride does not apply to equipment
+--- (its removal counterpart is not even bound at runtime). The only working
+--- approach, as used by shipped transmog mods, is to equip a *different item*.
+---
+--- A preview is much lighter than a real transmog, though, because it does not
+--- need to stay playable: transmog mods copy ~25 components across so the item
+--- keeps its stats, armour class and boosts, and several more components crash
+--- the game if copied. We copy nothing, spawn with temporary=1, and put the
+--- original back afterwards.
+local preview = {
+    active = false,
+    character = nil,
+    slot = nil,
+    originalItem = nil,
+    previewItem = nil,
+    template = nil,
+    equipped = false,
+    lastError = nil,
+}
+
+local function previewStatus()
+    return {
+        active = preview.active,
+        equipped = preview.equipped,
+        character = preview.character,
+        slot = preview.slot,
+        template = preview.template,
+        previewItem = preview.previewItem,
+        originalItem = preview.originalItem,
+        lastError = preview.lastError,
+    }
+end
+
+local function restorePreview()
+    if not preview.active then
+        return previewStatus()
+    end
+
+    -- Re-equipping the original displaces the preview item; there is no Osi
+    -- unequip, so this ordering matters.
+    if preview.originalItem ~= nil and preview.originalItem ~= "" then
+        pcall(function()
+            Osi.Equip(preview.character, preview.originalItem, 1, 0, 1)
+        end)
+    end
+
+    -- Equipping settles a moment later, so deleting immediately would be
+    -- deleting a still-equipped item. Defer it.
+    local doomed = preview.previewItem
+    if doomed ~= nil and doomed ~= "" then
+        Ext.Timer.WaitFor(200, function()
+            pcall(function()
+                Osi.RequestDelete(doomed)
+            end)
+        end)
+    end
+
+    local finished = previewStatus()
+    preview.active = false
+    preview.equipped = false
+    preview.previewItem = nil
+    preview.originalItem = nil
+    preview.slot = nil
+    preview.template = nil
+    finished.restored = true
+    return finished
+end
+
+H["item.preview"] = function(params)
+    local action = params.action or "status"
+
+    if action == "status" then
+        return previewStatus()
+    elseif action == "restore" then
+        return restorePreview()
+    elseif action ~= "apply" then
+        error("unknown action: " .. tostring(action) .. " (expected apply, restore or status)")
+    end
+
+    if preview.active then
+        error("a preview is already active (" .. tostring(preview.template) .. "); restore it first")
+    end
+
+    local templateId = params.template
+    if type(templateId) ~= "string" or templateId == "" then
+        error("params.template is required — a root template UUID, e.g. from bg3_find_template")
+    end
+
+    local template = Ext.Template.GetTemplate(templateId)
+    if template == nil then
+        error("no root template found with id: " .. tostring(templateId))
+    end
+
+    local character = params.character
+    if type(character) ~= "string" or character == "" then
+        character = Osi.GetHostCharacter()
+    end
+
+    -- temporary=1 so the engine treats it as disposable, playSpawn=0 to skip
+    -- the spawn animation and sound.
+    local spawned = Osi.CreateAt(template.Id, 0, 0, 0, 1, 0, "")
+    if spawned == nil or spawned == "" then
+        error("Osi.CreateAt returned nothing for template " .. tostring(templateId))
+    end
+
+    preview.active = true
+    preview.equipped = false
+    preview.character = tostring(character)
+    preview.template = tostring(templateId)
+    preview.previewItem = tostring(spawned)
+    preview.originalItem = nil
+    preview.slot = params.slot
+    preview.lastError = nil
+
+    -- Equipping immediately fails: the engine is still populating the entity.
+    -- Armory found by experiment that a tick and 10ms are both too early and
+    -- settled on 50ms, which matches what we see.
+    Ext.Timer.WaitFor(50, function()
+        local ok, err = pcall(function()
+            -- Read the slot from the item's Equipable component, not from
+            -- Osi.GetEquipmentSlotForItem: the latter returns an enum index
+            -- ("1") that GetEquippedItem does not accept, so the original was
+            -- silently never recorded and restore had nothing to put back.
+            local slot = preview.slot
+            if type(slot) ~= "string" or slot == "" then
+                local entity = Ext.Entity.Get(preview.previewItem)
+                if entity ~= nil then
+                    pcall(function()
+                        slot = tostring(entity.Equipable.Slot)
+                    end)
+                end
+                preview.slot = (type(slot) == "string" and slot ~= "") and slot or nil
+            end
+
+            if preview.slot ~= nil then
+                local current = Osi.GetEquippedItem(preview.character, preview.slot)
+                if current ~= nil and current ~= "" then
+                    preview.originalItem = tostring(current)
+                end
+            end
+
+            Osi.Equip(preview.character, preview.previewItem, 1, 0, 1)
+            preview.equipped = true
+        end)
+
+        if not ok then
+            preview.lastError = tostring(err)
+        end
+    end)
+
+    local status = previewStatus()
+    status.pending = "equip scheduled in 50ms; read status to confirm"
+    return status
 end
 
 H["ping"] = function()

@@ -85,6 +85,8 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
 | `bg3_bridge_status` | Is the game running with the bridge loaded, and what does each context support |
 | `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
 | `bg3_find_resource` | Search sounds, visuals, materials and effects by name to get their GUIDs |
+| `bg3_find_template` | Search root templates — name to template id, stat entry and visual GUID |
+| `bg3_preview_item` | Temporarily wear an item to see how it looks, then restore |
 | `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
 | `bg3_capture_sounds` | Record which sound events the game actually fires — "what sound was that?" |
 | `bg3_eval` | Run a Lua chunk in the live game and get its return values |
@@ -150,6 +152,24 @@ Foley events add a second failure mode: many are gated on Wwise **switches** suc
 Sounds attached to a spell are exposed as stat fields and are straightforward to swap — `Projectile_Jump` carries `CastSound`, `PrepareSound` and `PrepareLoopSound`, so overriding one is a stat edit. Movement foley is not: `MOVEMENT.bnk` has 36 events and none of them is a landing, and no `ImpactSound` field exists on the jump spell. Layering a sound on top from Lua is easy; genuinely *replacing* engine-driven foley means rebuilding a soundbank, which is outside what this does.
 
 **`bg3_play_sound` is a development tool, not a player-facing feature.** It fires when the tool is called from outside the game; nothing is bound to input and the person playing gets no control from it. Letting a player trigger sounds at will is a mod — the same `Ext.Audio.PostEvent` call, bound to a spell, item or console command.
+
+## Looking at items and armour
+
+Templates carry cross-references that resources do not, so one search yields the whole graph:
+
+```
+bg3_find_template query=ARM_Plate templateType=item
+  ARM_Plate_Dwarven   id=b4c754d8-...  stats=ARM_Plate_Body  visual=fcaf0df1-...
+
+bg3_preview_item action=apply template=b4c754d8-...   wear it
+bg3_preview_item action=restore                        put the original back
+```
+
+**There is no in-place visual swap in BG3.** Writing an equipped item's `GameObjectVisual` changes the value and nothing else; `Osi.AddCustomVisualOverride` does not apply to equipment, and its removal counterpart is not bound at runtime under either spelling in `Osi.lua`. Shipped transmog mods work by *equipping a different item* — spawning the good-looking one, copying the original's stats onto it, and wearing that.
+
+`bg3_preview_item` does the light version of the same thing, since a preview does not have to stay playable. It spawns the template with `temporary=1`, equips it, moves the original to inventory, and restores on request. Two consequences worth knowing: the preview is a **real item with its own stats**, so previewing plate over leather genuinely changes armour class — don't do it mid-combat — and an un-restored preview leaves the original sitting in inventory.
+
+Slot detection reads the item's `Equipable.Slot`, which reports `Breast`. `Osi.GetEquipmentSlotForItem` returns an enum index (`1`) that `GetEquippedItem` will not accept.
 
 ## Known limits
 
