@@ -116,6 +116,30 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_list_mods',
+        {
+            title: 'List loaded mods',
+            description:
+                'List the mods actually mounted in the running game, in load order. Check this first whenever a mod "is not ' +
+                'working": if it is absent here the pak never mounted or it is missing from modsettings.lsx, and no amount of ' +
+                'stat or script debugging will help. Load order changes require a full game restart — reloading a save is not ' +
+                'enough, and the game rewrites modsettings.lsx on exit, which can discard edits made while it was running.',
+            inputSchema: z.object({
+                filter: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Case-insensitive substring matched against both directory and display name. Base game modules ' +
+                            '(Gustav, Shared, DiceSet_01, ...) are listed too, so filter to cut them out.',
+                    ),
+                context: contextSchema,
+            }),
+        },
+        async ({ filter, context }) => bridge(context, 'mods.list', { filter }),
+    );
+
+    defineTool(
+        server,
         'bg3_eval',
         {
             title: 'Evaluate Lua in the running game',

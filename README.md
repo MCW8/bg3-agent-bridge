@@ -83,6 +83,7 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
 | Tool | Purpose |
 |---|---|
 | `bg3_bridge_status` | Is the game running with the bridge loaded, and what does each context support |
+| `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
 | `bg3_eval` | Run a Lua chunk in the live game and get its return values |
 | `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` |
 | `bg3_entity_inspect` | List an entity's components, or dump one by name |
@@ -100,6 +101,16 @@ Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_DIVINE_
 **Some objects cannot be serialized at all.** Large stat entries — spells especially — follow an inheritance chain deep enough to exceed the JSON serializer's recursion limit, and that limit *raises* rather than truncating, so a lower `depth` turns a large result into a hard error instead of a smaller one. `bg3_stats_get` on `Projectile_MagicMissile` fails this way; reading a single `attribute` from the same entry returns instantly. Prefer `attribute` and `component` over whole-object dumps.
 
 **Round trips cost about a second.** The mod polls every 30 ticks. One poll costs Script Extender 7-9ms, enough that it is flagged as a slow event, so polling faster trades frame time for latency that agent workflows do not need.
+
+**Three tiers of change, only one of which is fast.**
+
+| Change | To apply it |
+|---|---|
+| Mod Lua | `bg3_reload` — about 1.5s |
+| Packed data (stats, root templates, localization) | Repack and restart the game |
+| Load order (`modsettings.lsx`, adding a pak) | Restart the game — **and** see the hazard below |
+
+Reloading a *save* applies none of these; it re-reads the save, not the module list. Worse, the game rewrites `modsettings.lsx` on exit from its in-memory load order, so an entry added while the game was running can be silently discarded when you quit. Edit that file with the game closed, and use `bg3_list_mods` to confirm what actually mounted.
 
 **Hot reload only covers Lua, and it is not per-context.** `bg3_reload` reinitialises the Lua VM, so edited scripts take effect immediately. Changes to packed data — stats, root templates, localization — still need a repack and a restart. `Ext.Debug.Reset()` restarts **both** the server and client VMs no matter which context asks, so all in-memory Lua state goes with it, including runtime edits made through `bg3_stats_set`. The `context` argument picks the transport, not the scope.
 
