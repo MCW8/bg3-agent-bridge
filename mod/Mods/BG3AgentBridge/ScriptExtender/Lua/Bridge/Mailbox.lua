@@ -37,7 +37,19 @@ local function respond(seq, ok, payload)
         body.error = tostring(payload)
     end
 
-    Ext.IO.SaveFile(Bridge.paths_.response, Bridge.encode(body))
+    local depth = Bridge.responseDepth
+    Bridge.responseDepth = nil
+
+    local encoded, reason = Bridge.encode(body, depth)
+    if encoded == nil then
+        encoded = Bridge.encodeFailure(
+            seq,
+            "result could not be serialized (" .. tostring(reason) .. "). "
+                .. "Request a single attribute or component instead of the whole object."
+        )
+    end
+
+    Ext.IO.SaveFile(Bridge.paths_.response, encoded)
 end
 
 local function dispatch(request)

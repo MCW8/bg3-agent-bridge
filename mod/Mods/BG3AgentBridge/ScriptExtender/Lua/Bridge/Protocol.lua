@@ -13,10 +13,11 @@ Bridge.PROTOCOL_VERSION = 1
 ---   %LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender\
 Bridge.ROOT = "BG3AgentBridge/"
 
---- Ticks between mailbox polls. The engine ticks per frame, so polling every
---- frame would read a file 60x/second for no benefit; ~4x/second is well
---- below agent round-trip latency.
-Bridge.POLL_INTERVAL_TICKS = 15
+--- Ticks between mailbox polls. Measured on a live session, one poll costs
+--- Script Extender ~8-9ms — enough that it gets flagged as a slow event, so
+--- this is deliberately conservative. Agent round trips are measured in
+--- seconds, which makes ~2 polls/second plenty responsive.
+Bridge.POLL_INTERVAL_TICKS = 30
 
 function Bridge.paths(context)
     return {
@@ -43,30 +44,45 @@ end
 
 --- Compile a chunk using whichever loader this build exposes.
 --- Returns chunk, nil on success or nil, errorMessage on failure.
-function Bridge.compile(code, chunkName)
-    local name = chunkName or "@agent-eval"
+---
+--- Script Extender's `load` does not take standard Lua's chunk-name string as
+--- argument 2 — it expects an environment table there. Passing only the source
+--- is the portable call across both shapes.
+function Bridge.compile(code)
     if type(load) == "function" then
-        return load(code, name)
+        return load(code)
     end
     if type(loadstring) == "function" then
-        return loadstring(code, name)
+        return loadstring(code)
     end
     return nil, "no Lua loader (load/loadstring) is exposed in this sandbox"
 end
 
-local STRINGIFY_OPTIONS = {
-    Beautify = false,
-    StringifyInternalTypes = true,
-    IterateUserdata = true,
-    AvoidRecursion = true,
-    MaxDepth = 6,
-}
+Bridge.DEFAULT_MAX_DEPTH = 6
 
---- Encode a value to JSON, degrading rather than throwing.
---- Live engine objects are userdata and can defeat the serializer at depth,
---- so every failure path still produces a parseable response body.
-function Bridge.encode(value)
-    local ok, encoded = pcall(Ext.Json.Stringify, value, STRINGIFY_OPTIONS)
+--- Handlers set this to cap serialization depth for one response when the
+--- payload is a live engine object that can blow up under a deep walk. Cleared
+--- by the mailbox after every reply.
+Bridge.responseDepth = nil
+
+local function stringifyOptions(maxDepth)
+    return {
+        Beautify = false,
+        StringifyInternalTypes = true,
+        IterateUserdata = true,
+        AvoidRecursion = true,
+        MaxDepth = maxDepth or Bridge.DEFAULT_MAX_DEPTH,
+    }
+end
+
+--- Encode a value to JSON. Returns nil plus a reason when the value cannot be
+--- represented; callers must then build a correlatable failure themselves.
+---
+--- Note that MaxDepth *raises* once exceeded rather than truncating, so a lower
+--- limit turns large-but-valid payloads into hard errors instead of shorter
+--- ones. Keep it generous and use narrower queries for big objects.
+function Bridge.encode(value, maxDepth)
+    local ok, encoded = pcall(Ext.Json.Stringify, value, stringifyOptions(maxDepth))
     if ok and type(encoded) == "string" then
         return encoded
     end
@@ -76,15 +92,29 @@ function Bridge.encode(value)
         return plain
     end
 
-    local okFallback, fallback = pcall(Ext.Json.Stringify, {
+    return nil, tostring(encoded)
+end
+
+--- A reply that is guaranteed to encode and, critically, still carries `seq`.
+--- A response without it can never be matched by the caller, so a single
+--- unserializable result would otherwise present as an indefinite hang.
+function Bridge.encodeFailure(seq, message)
+    local body = {
+        seq = seq,
         ok = false,
-        error = "response was not serializable: " .. tostring(encoded),
-    })
-    if okFallback then
-        return fallback
+        context = Bridge.context,
+        protocol = Bridge.PROTOCOL_VERSION,
+        error = message,
+    }
+
+    local ok, encoded = pcall(Ext.Json.Stringify, body)
+    if ok and type(encoded) == "string" then
+        return encoded
     end
 
-    return '{"ok":false,"error":"response serialization failed"}'
+    -- Last resort, hand-built. seq is a number and the message is ours, so
+    -- there is nothing here that needs escaping.
+    return '{"seq":' .. tostring(seq) .. ',"ok":false,"error":"response serialization failed"}'
 end
 
 --- Reduce a Lua value to something the serializer can handle.
