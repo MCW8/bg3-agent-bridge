@@ -122,6 +122,14 @@ bg3_play_sound    target=Global stop=true             -- if a looping event will
 
 `target` takes a built-in sound object — `Global`, `Music`, `Ambient`, `HUD`, `Listener` — or an entity UUID to play positionally. Those names were found by probing, since the engine rejects unknown ones and exposes no enum to list them; other plausible names (`UI`, `Camera`, `Player`, `World`) are not valid. A misspelled event returns `posted: false` rather than raising, which is how you tell "Wwise does not know this event" from "the call failed".
 
+**`posted: true` does not mean you heard anything.** Most game sounds are positional: fire one at a built-in object and it plays nowhere near the listener, returning success in silence. Prefer `target=<character UUID>`. When a built-in target is used the tool looks the event up and warns if its `MaxDistance` is short — `Action_Cast_Jump` at 50 is inaudible on `Global`, while the forge hammer at 120 carries fine.
+
+Foley events add a second failure mode: many are gated on Wwise **switches** such as surface material or character size, and fired cold they resolve to little or nothing. A valid event that plays as a faint click is usually this rather than a wrong GUID. `Ext.Audio.SetSwitch` is the lever, and is not yet wrapped as a tool.
+
+### What this means for audio mods
+
+Sounds attached to a spell are exposed as stat fields and are straightforward to swap — `Projectile_Jump` carries `CastSound`, `PrepareSound` and `PrepareLoopSound`, so overriding one is a stat edit. Movement foley is not: `MOVEMENT.bnk` has 36 events and none of them is a landing, and no `ImpactSound` field exists on the jump spell. Layering a sound on top from Lua is easy; genuinely *replacing* engine-driven foley means rebuilding a soundbank, which is outside what this does.
+
 **`bg3_play_sound` is a development tool, not a player-facing feature.** It fires when the tool is called from outside the game; nothing is bound to input and the person playing gets no control from it. Letting a player trigger sounds at will is a mod — the same `Ext.Audio.PostEvent` call, bound to a spell, item or console command.
 
 ## Known limits
