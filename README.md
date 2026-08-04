@@ -86,6 +86,7 @@ Edits to the Lua then apply on the next `bg3_reload` with no repack step at all.
 | `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
 | `bg3_find_resource` | Search sounds, visuals, materials and effects by name to get their GUIDs |
 | `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
+| `bg3_capture_sounds` | Record which sound events the game actually fires — "what sound was that?" |
 | `bg3_eval` | Run a Lua chunk in the live game and get its return values |
 | `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` |
 | `bg3_entity_inspect` | List an entity's components, or dump one by name |
@@ -111,7 +112,23 @@ bg3_find_resource type=Visual query=barbarian
 
 Sounds carry a readable `SoundEvent`; visuals carry `Slot`, `Template` and `SkeletonResource`; `moddedOnly` narrows to what a mod added. Scans are whole-bank — roughly 160ms across 24k sounds and 740ms across 60k visuals, which is a brief but real hitch in the running game, so prefer a narrow `query`.
 
-There is no way to capture a sound that just played: `Ext.Audio` exposes `PostEvent`, `SetState` and `SetSwitch` — it fires audio, it does not observe it. So the loop is search, then audition:
+### Hearing what the game fires
+
+`Ext.Audio` is write-only, but the engine's `SoundRoutingSystem` exposes the queue of sound requests it is about to dispatch, and that queue is readable from a tick handler. `bg3_capture_sounds` drains it every tick, so you can answer "what sound was that?":
+
+```
+bg3_capture_sounds action=start        arm it
+   ... do the thing in game ...
+bg3_capture_sounds action=read         what fired, in order, with repeat counts
+```
+
+Entries carry the event name, the subject entity, and the event type. Repeats on consecutive frames collapse into one entry with a `count`, and buffer overflow is counted rather than silently dropped.
+
+**It does not see everything.** Movement foley — footsteps, landings — is fired from the animation system straight to Wwise and never enters this queue. Spells, items, interactions and scripted events do. Jumping, for instance, surfaces only `Shake_Rumble_Start`/`_Stop`, which is the rumble channel rather than the footfall.
+
+### Auditioning a sound
+
+The search-then-play loop still matters for sounds you have a name for rather than an action to perform:
 
 ```
 bg3_find_resource type=Sound query=thunderwave     -> SoundEvent name

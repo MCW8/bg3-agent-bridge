@@ -116,6 +116,38 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_capture_sounds',
+        {
+            title: 'Capture sounds the game fires',
+            description:
+                'Record which sound events the engine actually dispatches, by draining its internal routing queue every tick. ' +
+                'Use it to answer "what sound was that?": start the capture, perform the action in game, then read it back. ' +
+                'Important limit — movement foley (footsteps, landings) is fired from the animation system straight to Wwise ' +
+                'and never appears here; spells, items, interactions and scripted events do. Always runs in the client context.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['start', 'stop', 'read', 'clear', 'status'])
+                    .default('status')
+                    .describe('start clears the buffer and begins recording; read returns what was caught; stop leaves the buffer intact'),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(2000)
+                    .default(200)
+                    .describe('Buffer size, applied on start. Overflow is counted rather than silently lost.'),
+                dedupe: z
+                    .boolean()
+                    .default(true)
+                    .describe('Collapse an event repeating on consecutive frames into one entry with a count'),
+                clear: z.boolean().default(false).describe('With action=read, empty the buffer after returning it'),
+            }),
+        },
+        async ({ action, limit, dedupe, clear }) => bridge('client', 'audio.capture', { action, limit, dedupe, clear }),
+    );
+
+    defineTool(
+        server,
         'bg3_play_sound',
         {
             title: 'Play a sound in the running game',

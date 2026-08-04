@@ -154,6 +154,144 @@ local function resolveSoundObject(target)
     return entity
 end
 
+--- Live capture of sounds the engine fires.
+---
+--- Ext.Audio is write-only, but SoundRoutingSystem exposes the queue of
+--- SoundPostEventRequests the engine is about to dispatch, and that queue is
+--- readable from a tick handler. Draining it every tick is the only way to
+--- observe audio, since the queue is emptied within the frame.
+---
+--- Note what this does NOT see: movement foley is fired from the animation
+--- system straight to Wwise and never appears here. Spells, items, interactions
+--- and scripted events do.
+local capture = {
+    active = false,
+    installed = false,
+    events = {},
+    seen = 0,
+    dropped = 0,
+    limit = 200,
+    dedupe = true,
+}
+
+local function captureTick()
+    if not capture.active then
+        return
+    end
+
+    local ok, system = pcall(function()
+        return Ext.System.SoundRouting
+    end)
+    -- Never compare these against nil: on this build `Ext.System == nil` raises
+    -- "attempt to call a nil value", because the userdata's equality metamethod
+    -- is not callable. Indexing and type() are both fine.
+    if not ok or type(system) ~= "userdata" then
+        return
+    end
+
+    local queue = system.PostEvent
+    if type(queue) ~= "userdata" then
+        return
+    end
+
+    local okCount, count = pcall(function()
+        return #queue
+    end)
+    if not okCount or count == nil or count == 0 then
+        return
+    end
+
+    for i = 1, count do
+        local request = queue[i]
+        local name, subject, kind
+        pcall(function()
+            name = tostring(request.Event)
+        end)
+        pcall(function()
+            subject = tostring(request.Subject)
+        end)
+        pcall(function()
+            kind = tostring(request.Type)
+        end)
+        name = name or "<unknown>"
+
+        capture.seen = capture.seen + 1
+
+        -- The same event often fires several frames running; collapsing repeats
+        -- keeps a busy scene from filling the buffer with one sound.
+        local last = capture.events[#capture.events]
+        if capture.dedupe and last ~= nil and last.event == name and last.subject == subject then
+            last.count = last.count + 1
+        elseif #capture.events < capture.limit then
+            capture.events[#capture.events + 1] = {
+                event = name,
+                subject = subject,
+                type = kind,
+                count = 1,
+            }
+        else
+            capture.dropped = capture.dropped + 1
+        end
+    end
+end
+
+local function captureStatus()
+    return {
+        active = capture.active,
+        buffered = #capture.events,
+        seen = capture.seen,
+        dropped = capture.dropped,
+        limit = capture.limit,
+        dedupe = capture.dedupe,
+    }
+end
+
+H["audio.capture"] = function(params)
+    -- Type check rather than a nil comparison: see the note in captureTick.
+    if type(Ext.System) ~= "userdata" then
+        error("Ext.System is unavailable — sound capture needs the client context")
+    end
+
+    local action = params.action or "status"
+
+    if action == "start" then
+        capture.events = {}
+        capture.seen = 0
+        capture.dropped = 0
+        capture.limit = tonumber(params.limit) or 200
+        capture.dedupe = params.dedupe ~= false
+        capture.active = true
+
+        -- Subscribe lazily and only once: an always-on tick handler would cost
+        -- every user every frame for a feature almost nobody has running.
+        if not capture.installed then
+            Ext.Events.Tick:Subscribe(captureTick)
+            capture.installed = true
+        end
+
+        return captureStatus()
+    elseif action == "stop" then
+        capture.active = false
+        return captureStatus()
+    elseif action == "clear" then
+        capture.events = {}
+        capture.seen = 0
+        capture.dropped = 0
+        return captureStatus()
+    elseif action == "read" or action == "status" then
+        local status = captureStatus()
+        if action == "read" then
+            status.events = capture.events
+            if params.clear == true then
+                capture.events = {}
+            end
+        end
+        return status
+    end
+
+    error("unknown action: " .. tostring(action) .. " (expected start, stop, read, clear or status)")
+end
+
 H["audio.post"] = function(params)
     if Ext.Audio == nil then
         error("Ext.Audio is unavailable — audio is client side only, so this has to run in the client context")
