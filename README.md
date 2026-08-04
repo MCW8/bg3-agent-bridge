@@ -112,19 +112,21 @@ bg3_find_resource type=Visual query=barbarian
 
 Sounds carry a readable `SoundEvent`; visuals carry `Slot`, `Template` and `SkeletonResource`; `moddedOnly` narrows to what a mod added. Scans are whole-bank — roughly 160ms across 24k sounds and 740ms across 60k visuals, which is a brief but real hitch in the running game, so prefer a narrow `query`.
 
-### Hearing what the game fires
+### Capturing engine sound requests (limited)
 
-`Ext.Audio` is write-only, but the engine's `SoundRoutingSystem` exposes the queue of sound requests it is about to dispatch, and that queue is readable from a tick handler. `bg3_capture_sounds` drains it every tick, so you can answer "what sound was that?":
+`Ext.Audio` is write-only, but the engine's `SoundRoutingSystem` exposes a queue of `SoundPostEventRequest`s, and that queue is readable from a tick handler. `bg3_capture_sounds` drains it every tick:
 
 ```
 bg3_capture_sounds action=start        arm it
    ... do the thing in game ...
-bg3_capture_sounds action=read         what fired, in order, with repeat counts
+bg3_capture_sounds action=read         what was queued, with repeat counts
 ```
 
-Entries carry the event name, the subject entity, and the event type. Repeats on consecutive frames collapse into one entry with a `count`, and buffer overflow is counted rather than silently dropped.
+Entries carry the event name, subject entity, and type. Repeats on consecutive frames collapse into a `count`, and overflow is counted rather than dropped.
 
-**It does not see everything.** Movement foley — footsteps, landings — is fired from the animation system straight to Wwise and never enters this queue. Spells, items, interactions and scripted events do. Jumping, for instance, surfaces only `Shake_Rumble_Start`/`_Stop`, which is the rumble channel rather than the footfall.
+**Set your expectations low: this is not a general "what sound was that?" tool.** Testing against jumping and against repeated spell casts produced `Shake_Rumble_Start`/`_Stop` and nothing else — the rumble and screen-shake channel. The audio you actually hear, including the cast and impact sounds of a spell that visibly triggered these entries, never appeared in the queue. Most of BG3's audio evidently reaches Wwise by a path that does not pass through this system.
+
+What it is genuinely good for is detecting **impact and shake moments** — landings, AOE impacts — with a per-event subject entity, which is a reliable hook even though it tells you nothing about the audio. Whether any other category of sound ever appears here is unproven; two tests both returned rumble only.
 
 ### Auditioning a sound
 

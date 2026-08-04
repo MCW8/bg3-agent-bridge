@@ -120,10 +120,11 @@ function registerTools(server: McpServer): void {
         {
             title: 'Capture sounds the game fires',
             description:
-                'Record which sound events the engine actually dispatches, by draining its internal routing queue every tick. ' +
-                'Use it to answer "what sound was that?": start the capture, perform the action in game, then read it back. ' +
-                'Important limit — movement foley (footsteps, landings) is fired from the animation system straight to Wwise ' +
-                'and never appears here; spells, items, interactions and scripted events do. Always runs in the client context.',
+                'Record sound requests queued through the engine SoundRoutingSystem: start the capture, act in game, read it ' +
+                'back. Treat this as an impact/shake detector rather than a general audio observer — in testing against both ' +
+                'jumping and spell casts it returned only Shake_Rumble_Start/Stop, and the audio actually heard never appeared. ' +
+                'Most of the game reaches Wwise by another path. Entries do carry a per-event subject entity, which makes it a ' +
+                'reliable hook for landings and AOE impacts. Always runs in the client context.',
             inputSchema: z.object({
                 action: z
                     .enum(['start', 'stop', 'read', 'clear', 'status'])
