@@ -45,6 +45,80 @@ function Bridge.resolveComponent(entity, name)
     return nil, nil
 end
 
+--- ModVersion comes back as a four element array, not a string.
+local function versionString(value)
+    local parts = {}
+    local ok = pcall(function()
+        for _, n in ipairs(value) do
+            parts[#parts + 1] = tostring(n)
+        end
+    end)
+
+    if not ok or #parts == 0 then
+        return "unknown"
+    end
+    return table.concat(parts, ".")
+end
+
+--- Dependencies are ModuleShortDesc objects rather than plain names.
+local function dependencyNames(mod)
+    local names = {}
+    pcall(function()
+        for _, dep in ipairs(mod.Dependencies) do
+            local label
+            pcall(function()
+                label = dep.Folder or dep.Name
+            end)
+            names[#names + 1] = tostring(label or "unknown")
+        end
+    end)
+    return names
+end
+
+H["mods.list"] = function(params)
+    local order = Ext.Mod.GetLoadOrder()
+
+    local needle = params.filter
+    if type(needle) == "string" and needle ~= "" then
+        needle = string.lower(needle)
+    else
+        needle = nil
+    end
+
+    local mods = {}
+    for index, uuid in ipairs(order) do
+        local ok, mod = pcall(Ext.Mod.GetMod, uuid)
+        if ok and mod ~= nil and mod.Info ~= nil then
+            local info = mod.Info
+            local directory = tostring(info.Directory)
+            local name = tostring(info.Name)
+
+            local matches = needle == nil
+                or string.find(string.lower(directory), needle, 1, true) ~= nil
+                or string.find(string.lower(name), needle, 1, true) ~= nil
+
+            if matches then
+                mods[#mods + 1] = {
+                    loadIndex = index,
+                    directory = directory,
+                    name = name,
+                    author = tostring(info.Author),
+                    uuid = tostring(info.ModuleUUIDString or info.ModuleUUID),
+                    version = versionString(info.ModVersion),
+                    -- Mods is keyed by the ModTable in ScriptExtender/Config.json.
+                    -- That conventionally matches the directory but is not required
+                    -- to, so a false here means "no Lua under this directory name",
+                    -- not necessarily "no Lua at all".
+                    luaLoaded = Mods ~= nil and Mods[directory] ~= nil,
+                    dependencies = dependencyNames(mod),
+                }
+            end
+        end
+    end
+
+    return { total = #order, returned = #mods, mods = mods }
+end
+
 H["ping"] = function()
     return {
         pong = true,
