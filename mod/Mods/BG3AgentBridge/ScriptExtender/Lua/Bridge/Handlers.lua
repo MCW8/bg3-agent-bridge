@@ -536,6 +536,153 @@ end
 --- This is a third data layer beside resources and templates, and the one that
 --- holds the pieces nothing else exposes: MultiEffectInfo (what a status
 --- actually looks like), VFX, Flag, Tag, Race, Progression, SpellList.
+--- Resolve a stat's DisplayName handle to the text a player sees.
+local function statDisplayName(stat)
+    local ok, handle = pcall(function()
+        return tostring(stat.DisplayName)
+    end)
+    if not ok or handle == nil or handle == '' then
+        return nil
+    end
+    local okText, text = pcall(function()
+        return Ext.Loca.GetTranslatedString(handle)
+    end)
+    if not okText or text == nil then
+        return nil
+    end
+    text = tostring(text)
+    return text ~= '' and text or nil
+end
+
+--- Search stat entries by name or by the name players actually see.
+---
+--- Statuses, spells, armour and weapons all live here rather than in the
+--- template or static data banks, and until now nothing could search them —
+--- bg3_stats_get needed an exact name you already knew.
+H["stats.find"] = function(params)
+    local statType = params.type
+    if type(statType) ~= 'string' or statType == '' then
+        statType = 'StatusData'
+    end
+
+    local ok, names = pcall(function()
+        return Ext.Stats.GetStats(statType)
+    end)
+    if not ok or type(names) ~= 'table' then
+        error('unknown stat type: ' .. tostring(statType)
+            .. '. Try StatusData, SpellData, Armor, Weapon, Object, Passive, Interrupt, Character.')
+    end
+
+    local needle = params.query
+    if type(needle) == 'string' and needle ~= '' then
+        needle = string.lower(needle)
+    else
+        needle = nil
+    end
+    local needleNormalized = needle and normalize(needle) or nil
+    local queryTokens = needle and queryTokensFor(needle) or {}
+
+    local limit = tonumber(params.limit) or 25
+    if limit < 1 then limit = 1 elseif limit > 200 then limit = 200 end
+
+    local clock = Ext.Utils ~= nil and Ext.Utils.MonotonicTime or nil
+    local started = clock and clock() or nil
+
+    local function summarize(name, stat, shown, distance)
+        local entry = { Name = name, DisplayName = shown }
+        for _, key in ipairs({ 'StatusType', 'SpellType', 'StatusEffect', 'Icon', 'Using', 'Level', 'Slot', 'ArmorType' }) do
+            local okField, value = pcall(function()
+                return stat[key]
+            end)
+            if okField and value ~= nil then
+                local t = type(value)
+                if t == 'string' or t == 'number' or t == 'boolean' then
+                    local text = tostring(value)
+                    if text ~= '' and text ~= 'None' then
+                        entry[key] = value
+                    end
+                end
+            end
+        end
+        -- Resolve the visual so a caller can see what it looks like without a
+        -- second round trip.
+        if entry.StatusEffect ~= nil then
+            local okm, info = pcall(function()
+                return Ext.StaticData.Get(tostring(entry.StatusEffect), 'MultiEffectInfo')
+            end)
+            if okm and info ~= nil then
+                entry.StatusEffectName = tostring(info.Name)
+            end
+        end
+        if distance ~= nil then
+            entry.fuzzyDistance = distance
+        end
+        return entry
+    end
+
+    local results, matched = {}, 0
+    local pool = {}
+
+    for _, name in ipairs(names) do
+        local stat = Ext.Stats.Get(name)
+        if stat ~= nil then
+            local shown = statDisplayName(stat)
+            pool[#pool + 1] = { name = name, stat = stat, shown = shown }
+
+            local hit = needle == nil
+            if not hit then
+                hit = string.find(string.lower(name), needle, 1, true) ~= nil
+                    or string.find(normalize(name), needleNormalized, 1, true) ~= nil
+                if not hit and shown ~= nil then
+                    hit = string.find(string.lower(shown), needle, 1, true) ~= nil
+                        or string.find(normalize(shown), needleNormalized, 1, true) ~= nil
+                end
+            end
+
+            if hit then
+                matched = matched + 1
+                if #results < limit then
+                    results[#results + 1] = summarize(name, stat, shown)
+                end
+            end
+        end
+    end
+
+    local fuzzy = false
+    if matched == 0 and #queryTokens > 0 then
+        fuzzy = true
+        local scored = {}
+        for _, candidate in ipairs(pool) do
+            local score = fuzzyScore(candidate.name, queryTokens)
+            if score == nil and candidate.shown ~= nil then
+                score = fuzzyScore(candidate.shown, queryTokens)
+            end
+            if score ~= nil then
+                scored[#scored + 1] = { candidate = candidate, score = score }
+            end
+        end
+        table.sort(scored, function(a, b)
+            return a.score < b.score
+        end)
+        matched = #scored
+        for index = 1, math.min(limit, #scored) do
+            local c = scored[index].candidate
+            results[#results + 1] = summarize(c.name, c.stat, c.shown, scored[index].score)
+        end
+    end
+
+    return {
+        type = statType,
+        scanned = #names,
+        matched = matched,
+        returned = #results,
+        truncated = matched > #results,
+        fuzzy = fuzzy or nil,
+        elapsedMs = started and (clock() - started) or nil,
+        entries = results,
+    }
+end
+
 H["staticdata.find"] = function(params)
     local dataType = params.type
     if type(dataType) ~= 'string' or dataType == '' then
@@ -697,10 +844,11 @@ H["template.find"] = function(params)
         needle = nil
     end
 
-    -- Resolving a localised string for all ~32k templates is not free, so
-    -- searching display names is opt-in. Returned entries always carry theirs,
-    -- which costs nothing at a capped result count.
-    local searchDisplayNames = params.searchDisplayNames == true
+    -- On by default: measured at 31ms across all ~32k templates, which is
+    -- nothing against how often the wanted name is the player-facing one. Two
+    -- real searches failed without it — "Marked for Negation" is a status
+    -- called OBLITERATIONORB, sharing not one word with it.
+    local searchDisplayNames = params.searchDisplayNames ~= false
 
     local wantType = params.templateType
     if type(wantType) ~= "string" or wantType == "" then
