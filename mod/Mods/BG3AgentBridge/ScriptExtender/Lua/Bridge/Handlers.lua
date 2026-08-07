@@ -501,6 +501,190 @@ local function queryTokensFor(query)
     return tokens
 end
 
+local function staticDataTypes()
+    local names = {}
+    pcall(function()
+        for key in pairs(Ext.Enums.ExtResourceManagerType) do
+            if type(key) == 'string' then
+                names[#names + 1] = key
+            end
+        end
+    end)
+    table.sort(names)
+    return names
+end
+
+--- Flatten a static data entry to its scalar fields.
+local function summarizeStatic(entry, guid)
+    local summary = { Guid = tostring(guid) }
+    pcall(function()
+        for key, value in pairs(entry) do
+            local t = type(value)
+            if t == 'string' or t == 'number' or t == 'boolean' then
+                local text = tostring(value)
+                if text ~= '' and text ~= '00000000-0000-0000-0000-000000000000' then
+                    summary[key] = value
+                end
+            end
+        end
+    end)
+    return summary
+end
+
+--- Search a static data type by name.
+---
+--- This is a third data layer beside resources and templates, and the one that
+--- holds the pieces nothing else exposes: MultiEffectInfo (what a status
+--- actually looks like), VFX, Flag, Tag, Race, Progression, SpellList.
+H["staticdata.find"] = function(params)
+    local dataType = params.type
+    if type(dataType) ~= 'string' or dataType == '' then
+        error('params.type is required, e.g. "MultiEffectInfo", "VFX", "Flag", "Tag". Valid: '
+            .. table.concat(staticDataTypes(), ', '))
+    end
+
+    local ok, guids = pcall(function()
+        return Ext.StaticData.GetAll(dataType)
+    end)
+    if not ok or type(guids) ~= 'table' then
+        error('unknown static data type: ' .. tostring(dataType)
+            .. '. Valid: ' .. table.concat(staticDataTypes(), ', '))
+    end
+
+    local needle = params.query
+    if type(needle) == 'string' and needle ~= '' then
+        needle = string.lower(needle)
+    else
+        needle = nil
+    end
+    local needleNormalized = needle and normalize(needle) or nil
+    local queryTokens = needle and queryTokensFor(needle) or {}
+
+    local limit = tonumber(params.limit) or 25
+    if limit < 1 then
+        limit = 1
+    elseif limit > 200 then
+        limit = 200
+    end
+
+    local clock = Ext.Utils ~= nil and Ext.Utils.MonotonicTime or nil
+    local started = clock and clock() or nil
+
+    local results, matched = {}, 0
+    local entries = {}
+
+    for _, guid in ipairs(guids) do
+        local okGet, entry = pcall(function()
+            return Ext.StaticData.Get(guid, dataType)
+        end)
+        if okGet and entry ~= nil then
+            local name
+            pcall(function()
+                name = tostring(entry.Name)
+            end)
+            entries[#entries + 1] = { guid = guid, entry = entry, name = name }
+
+            local hit = needle == nil
+            if not hit and name ~= nil then
+                hit = string.find(string.lower(name), needle, 1, true) ~= nil
+                    or string.find(normalize(name), needleNormalized, 1, true) ~= nil
+            end
+
+            if hit then
+                matched = matched + 1
+                if #results < limit then
+                    results[#results + 1] = summarizeStatic(entry, guid)
+                end
+            end
+        end
+    end
+
+    -- Same fallback as template search: only pay for typo tolerance when the
+    -- literal pass found nothing.
+    local fuzzy = false
+    if matched == 0 and #queryTokens > 0 then
+        fuzzy = true
+        local scored = {}
+        for _, candidate in ipairs(entries) do
+            if candidate.name ~= nil then
+                local score = fuzzyScore(candidate.name, queryTokens)
+                if score ~= nil then
+                    scored[#scored + 1] = { candidate = candidate, score = score }
+                end
+            end
+        end
+        table.sort(scored, function(a, b)
+            return a.score < b.score
+        end)
+        matched = #scored
+        for index = 1, math.min(limit, #scored) do
+            local summary = summarizeStatic(scored[index].candidate.entry, scored[index].candidate.guid)
+            summary.fuzzyDistance = scored[index].score
+            results[#results + 1] = summary
+        end
+    end
+
+    return {
+        type = dataType,
+        scanned = #guids,
+        matched = matched,
+        returned = #results,
+        truncated = matched > #results,
+        fuzzy = fuzzy or nil,
+        elapsedMs = started and (clock() - started) or nil,
+        entries = results,
+    }
+end
+
+--- Which statuses reference a given MultiEffectInfo, by name fragment.
+---
+--- The lookup that closes the loop: you can see an effect in game or find it by
+--- name, but to actually use it you need the status that applies it, and
+--- nothing indexes that direction.
+H["status.usingEffect"] = function(params)
+    local needle = params.query
+    if type(needle) ~= 'string' or needle == '' then
+        error('params.query is required — a fragment of the effect name, e.g. "ghost"')
+    end
+    needle = string.lower(needle)
+    local needleNormalized = normalize(needle)
+
+    local wanted = {}
+    for _, guid in ipairs(Ext.StaticData.GetAll('MultiEffectInfo')) do
+        local ok, info = pcall(function()
+            return Ext.StaticData.Get(guid, 'MultiEffectInfo')
+        end)
+        if ok and info ~= nil then
+            local name = tostring(info.Name)
+            if string.find(string.lower(name), needle, 1, true) ~= nil
+                or string.find(normalize(name), needleNormalized, 1, true) ~= nil
+            then
+                wanted[tostring(guid)] = name
+            end
+        end
+    end
+
+    local statuses = {}
+    for _, statusName in ipairs(Ext.Stats.GetStats('StatusData')) do
+        local stat = Ext.Stats.Get(statusName)
+        if stat ~= nil then
+            local ok, effect = pcall(function()
+                return tostring(stat.StatusEffect)
+            end)
+            if ok and effect ~= nil and wanted[effect] ~= nil then
+                statuses[#statuses + 1] = {
+                    status = statusName,
+                    statusType = tostring(stat.StatusType),
+                    effect = wanted[effect],
+                    effectGuid = effect,
+                }
+            end
+        end
+    end
+
+    return { matchedEffects = wanted, statuses = statuses, count = #statuses }
+end
+
 H["template.find"] = function(params)
     local all = Ext.Template.GetAllRootTemplates()
 
@@ -995,6 +1179,108 @@ H["item.preview"] = function(params)
     local status = previewStatus()
     status.pending = "equip scheduled in 50ms; read status to confirm"
     return status
+end
+
+--- Statuses applied for auditioning, so they can all be cleared afterwards.
+--- Tracked rather than relying on duration: an EFFECT status with a long or
+--- permanent duration would otherwise be left on the character.
+local previewedStatuses = {}
+
+H["status.preview"] = function(params)
+    local action = params.action or 'status'
+
+    local character = params.character
+    if type(character) ~= 'string' or character == '' then
+        character = tostring(Osi.GetHostCharacter())
+    end
+
+    local function activeStatuses()
+        local active = {}
+        pcall(function()
+            local entity = Ext.Entity.Get(character)
+            for _, status in pairs(entity.ServerCharacter.StatusManager.Statuses) do
+                active[#active + 1] = tostring(status.StatusId)
+            end
+        end)
+        return active
+    end
+
+    if action == 'list' or action == 'status' then
+        return {
+            character = character,
+            applied = previewedStatuses,
+            active = activeStatuses(),
+        }
+    end
+
+    if action == 'clear' then
+        local removed = {}
+        for _, name in ipairs(previewedStatuses) do
+            pcall(function()
+                Osi.RemoveStatus(character, name)
+            end)
+            removed[#removed + 1] = name
+        end
+        previewedStatuses = {}
+        return { character = character, removed = removed }
+    end
+
+    if action == 'remove' then
+        local name = params.status
+        if type(name) ~= 'string' or name == '' then
+            error('params.status is required for remove')
+        end
+        pcall(function()
+            Osi.RemoveStatus(character, name)
+        end)
+        for index, tracked in ipairs(previewedStatuses) do
+            if tracked == name then
+                table.remove(previewedStatuses, index)
+                break
+            end
+        end
+        return { character = character, removed = name, active = activeStatuses() }
+    end
+
+    if action ~= 'apply' then
+        error('unknown action: ' .. tostring(action) .. ' (expected apply, remove, clear, list)')
+    end
+
+    local name = params.status
+    if type(name) ~= 'string' or name == '' then
+        error('params.status is required — a status name, e.g. "GHOST_FX"')
+    end
+
+    local stat = Ext.Stats.Get(name)
+    if stat == nil then
+        error('no status named "' .. tostring(name) .. '" — check bg3_find_status or bg3_stats_get')
+    end
+
+    local duration = tonumber(params.duration) or 60.0
+    local ok, err = pcall(function()
+        Osi.ApplyStatus(character, name, duration, 1, character)
+    end)
+    if not ok then
+        error('ApplyStatus failed: ' .. tostring(err))
+    end
+
+    local alreadyTracked = false
+    for _, tracked in ipairs(previewedStatuses) do
+        if tracked == name then
+            alreadyTracked = true
+        end
+    end
+    if not alreadyTracked then
+        previewedStatuses[#previewedStatuses + 1] = name
+    end
+
+    return {
+        character = character,
+        applied = name,
+        statusType = tostring(stat.StatusType),
+        duration = duration,
+        note = 'Osiris applies this a moment later; read back with action=list to confirm.',
+    }
 end
 
 H["ping"] = function()
