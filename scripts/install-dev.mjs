@@ -160,7 +160,20 @@ function updateModsettings({ remove }) {
     return { changed: true, backupPath, note: 'added to load order' };
 }
 
+/** Catch an old Node here, rather than as a confusing failure once the agent connects. */
+function checkNodeVersion() {
+    const major = Number.parseInt(process.versions.node.split('.')[0], 10);
+    if (Number.isFinite(major) && major < 20) {
+        fail(
+            `Node ${process.versions.node} is too old — this needs 20 or newer.\n\n` +
+                '  Update with:  winget install OpenJS.NodeJS.LTS\n' +
+                '  Then close this window and open a new one before retrying.',
+        );
+    }
+}
+
 function main() {
+    checkNodeVersion();
     const uninstall = process.argv.includes('--uninstall');
 
     if (gameIsRunning()) {
