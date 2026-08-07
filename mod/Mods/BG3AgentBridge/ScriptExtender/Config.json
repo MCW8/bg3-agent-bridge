@@ -1,5 +1,5 @@
 {
-    "RequiredVersion": 7,
+    "RequiredVersion": 32,
     "ModTable": "BG3AgentBridge",
     "FeatureFlags": ["Lua"]
 }
