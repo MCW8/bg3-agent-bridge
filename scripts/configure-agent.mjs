@@ -55,15 +55,24 @@ const CLIENTS = {
 };
 
 function printBlock() {
-    console.log('\n  Paste this into your agent\'s MCP config:\n');
+    console.log('\n  ─────────────────────────────────────────────────────────────────');
+    console.log('   Copy this and paste it to your AI agent, asking it to add the');
+    console.log('   server to its MCP config.');
+    console.log('  ─────────────────────────────────────────────────────────────────\n');
     console.log(
         JSON.stringify({ mcpServers: { [SERVER_KEY]: serverEntry } }, null, 2)
             .split('\n')
-            .map((line) => `    ${line}`)
+            .map((line) => `  ${line}`)
             .join('\n'),
     );
-    console.log('\n  Claude Code users can skip the file entirely:\n');
-    console.log(`    claude mcp add ${SERVER_KEY} -- node "${entryPoint}"\n`);
+    console.log('\n  ─────────────────────────────────────────────────────────────────\n');
+    console.log(
+        '  Most agents know where their own config lives and will create it if\n' +
+            '  needed. Restart the agent afterwards.\n\n' +
+            '  Claude Code can be told directly instead:\n' +
+            `    claude mcp add ${SERVER_KEY} -- node "${entryPoint}"\n\n` +
+            '  Or write the file yourself:  node scripts/configure-agent.mjs --list\n',
+    );
 }
 
 function listClients() {
