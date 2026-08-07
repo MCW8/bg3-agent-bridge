@@ -194,6 +194,7 @@ The `examples/` directory has two worked mods — a spell and an item — each w
 | `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
 | `bg3_find_resource` | Search sounds, visuals, materials and effects by name to get their GUIDs |
 | `bg3_find_template` | Search root templates — name to template id, stat entry and visual GUID |
+| `bg3_find_stat` | Search statuses, spells, armour and weapons by internal **or** in-game name |
 | `bg3_find_static_data` | Search ~130 static data types — effects, flags, tags, races, spell lists |
 | `bg3_find_status_by_effect` | Reverse lookup: which statuses apply a given visual effect |
 | `bg3_preview_item` | Temporarily wear an item to see how it looks, then restore |
@@ -278,6 +279,18 @@ Asset names are not the names players use. `bg3_find_template` therefore ignores
 The fuzzy pass only runs when the literal one finds nothing, so the usual case stays at ~110ms and typos cost ~350ms. Every word of the query has to match something, which is what ranks sensibly: `"blood lathandar"` puts the mace above a Lathander portrait, because nothing in the portrait resembles "blood". A single vague word cannot do that — `"Lathandar"` alone returns 44 hits in arbitrary order.
 
 Results carry the resolved `DisplayName`, which is usually the only practical way to tell `UNI_CRE_HUM_Sun_Mace_BloodOfLathander` from 173 other hits.
+
+**Searches match display names as well as internal ones, by default.** This matters more than it sounds. The status shown to players as *Marked for Negation* is internally `OBLITERATIONORB` — the two share not one word, so no name search of any kind reaches it. The same was true of a ghostly effect that turned out to be `LOW_OSKARSBELOVED_POSSESSING_FX`. Resolving display names across all 32k templates costs about 31ms, which is not worth optimising away.
+
+`bg3_find_stat` is the one to reach for when you remember what something is called in game:
+
+```
+bg3_find_stat type=StatusData query="Marked for Negation"
+  OBLITERATIONORB   "Marked for Negation"
+  StatusEffectName: END_ORB_OF_OBLITERATION_PLATFORM_WARNING_StatusEffect
+```
+
+It resolves the visual effect name too, so finding a status and learning what it looks like is one call rather than three.
 
 ## Finding a visual effect you have seen but cannot name
 

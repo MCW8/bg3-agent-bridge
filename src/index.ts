@@ -139,6 +139,30 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_find_stat',
+        {
+            title: 'Search stat entries',
+            description:
+                'Search statuses, spells, armour, weapons and passives by internal name OR by the name players see. Use this ' +
+                'to find a status when you only remember what it is called in game — "Marked for Negation" is a status ' +
+                'called OBLITERATIONORB, which no name search would ever reach. Returns the resolved DisplayName and, for ' +
+                'statuses, the name of the visual effect they apply, so one call usually answers the whole question. ' +
+                'Typo-tolerant.',
+            inputSchema: z.object({
+                type: z
+                    .string()
+                    .default('StatusData')
+                    .describe('Stat type: StatusData, SpellData, Armor, Weapon, Object, Passive, Interrupt, Character'),
+                query: z.string().optional().describe('Internal or display name; spaces, underscores and case are ignored'),
+                limit: z.number().int().min(1).max(200).default(25).describe('Maximum returned; matches counted in full'),
+                context: contextSchema,
+            }),
+        },
+        async ({ type, query, limit, context }) => bridge(context, 'stats.find', { type, query, limit }),
+    );
+
+    defineTool(
+        server,
         'bg3_find_status_by_effect',
         {
             title: 'Find statuses by visual effect',
@@ -212,11 +236,10 @@ function registerTools(server: McpServer): void {
                     .describe('Restrict by type: item, character, scenery, projectile, light, trigger, prefab, decal, surface'),
                 searchDisplayNames: z
                     .boolean()
-                    .default(false)
+                    .default(true)
                     .describe(
-                        'Also match against localised display names. Catches items whose internal name shares nothing with ' +
-                            'what players call them, at the cost of resolving a localised string per template — try it when a ' +
-                            'normal search comes up empty.',
+                        'Match against localised display names as well as internal ones. On by default and worth leaving on: ' +
+                            'internal names frequently share nothing with what players call a thing. Costs about 31ms.',
                     ),
                 limit: z.number().int().min(1).max(200).default(25).describe('Maximum returned; matches are counted in full'),
                 context: contextSchema,
