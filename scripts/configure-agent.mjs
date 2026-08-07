@@ -40,12 +40,16 @@ const CLIENTS = {
         label: 'Claude Desktop',
         file: path.join(appData, 'Claude', 'claude_desktop_config.json'),
     },
+    kimi: {
+        label: 'Kimi Code',
+        file: path.join(homedir(), '.kimi-code', 'mcp.json'),
+    },
     cursor: {
         label: 'Cursor (global)',
         file: path.join(homedir(), '.cursor', 'mcp.json'),
     },
     project: {
-        label: 'Project-scoped .mcp.json (Claude Code and others)',
+        label: 'Project-scoped .mcp.json, written to the current folder',
         file: path.join(process.cwd(), '.mcp.json'),
     },
 };
@@ -69,13 +73,26 @@ function listClients() {
         console.log(`    ${key.padEnd(16)} ${client.label}`);
         console.log(`    ${''.padEnd(16)} ${client.file}  (${state})`);
     }
-    console.log('\n  Write one with:  node scripts/configure-agent.mjs --write <name>\n');
+    console.log('\n  Write one with:  node scripts/configure-agent.mjs --write <name>');
+    console.log('  Not listed?      node scripts/configure-agent.mjs --path "C:/path/to/its/mcp.json"');
+    console.log('\n  ("project" writes to whatever folder you run this from, currently:');
+    console.log(`     ${process.cwd()} )\n`);
 }
 
-function writeClient(key) {
-    const client = CLIENTS[key];
+function writeClient(key, explicitPath) {
+    // --path covers clients that are not in the table. New agents appear faster
+    // than this list can track them, and they nearly all read `mcpServers`.
+    const client =
+        explicitPath !== undefined
+            ? { label: 'custom path', file: path.resolve(explicitPath) }
+            : CLIENTS[key];
+
     if (client === undefined) {
-        console.error(`\n  Unknown client "${key}". Known: ${Object.keys(CLIENTS).join(', ')}\n`);
+        console.error(
+            `\n  Unknown client "${key}". Known: ${Object.keys(CLIENTS).join(', ')}\n\n` +
+                '  For anything else, point at its config file directly:\n' +
+                '    node scripts/configure-agent.mjs --path "C:/Users/you/.some-agent/mcp.json"\n',
+        );
         process.exit(1);
     }
 
@@ -124,6 +141,16 @@ function main() {
 
     const args = process.argv.slice(2);
     if (args.includes('--list')) return listClients();
+
+    const pathIndex = args.indexOf('--path');
+    if (pathIndex !== -1) {
+        const target = args[pathIndex + 1];
+        if (target === undefined) {
+            console.error('\n  --path needs a file, e.g. --path "C:/Users/you/.some-agent/mcp.json"\n');
+            process.exit(1);
+        }
+        return writeClient(undefined, target);
+    }
 
     const writeIndex = args.indexOf('--write');
     if (writeIndex !== -1) {
