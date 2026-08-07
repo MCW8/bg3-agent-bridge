@@ -199,11 +199,24 @@ function main() {
     console.log(`  modsettings.lsx: ${result.note}`);
     if (result.backupPath) console.log(`  backup: ${result.backupPath}`);
 
+    // Print the agent config with the real path already substituted — nobody
+    // should have to work out where they extracted this.
+    const entryPoint = path.join(packageRoot, 'dist', 'index.js');
+    const entryForJson = entryPoint.replace(/\\/g, '/');
+
+    console.log('\n  Next: add this to your AI agent\'s MCP config\n');
     console.log(
-        '\n  Next:\n' +
-            '    1. Launch Baldur\'s Gate 3 and load a save\n' +
-            '    2. Ask your agent to call bg3_bridge_status, or run:\n' +
-            '         node scripts/check-bridge.mjs\n\n' +
+        JSON.stringify({ mcpServers: { 'bg3-agent-bridge': { command: 'node', args: [entryForJson] } } }, null, 2)
+            .split('\n')
+            .map((line) => `    ${line}`)
+            .join('\n'),
+    );
+    console.log(
+        '\n  Or have it written for you:\n' +
+            '    node scripts/configure-agent.mjs --list\n\n' +
+            '  Then launch Baldur\'s Gate 3, load a save, and ask your agent for\n' +
+            '  bg3_bridge_status. With no agent involved:\n' +
+            '    node scripts/check-bridge.mjs\n\n' +
             '  Editing the Lua under mod/ and re-running this script picks changes up on\n' +
             '  the next bg3_reload, with no game restart.\n',
     );
