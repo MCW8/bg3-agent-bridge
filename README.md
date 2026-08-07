@@ -27,6 +27,28 @@ MCP server (Node)                       Companion mod (Lua, in-game)
 
 Writes are atomic (temp file plus rename) so neither side reads a half-written message, and a sequence cursor keeps a completed request from being replayed after a VM reset. `server` and `client` contexts get separate mailboxes.
 
+## Read this before installing
+
+**This is a development tool, and it executes arbitrary Lua inside your game.**
+
+That is the whole point — `bg3_eval` runs whatever it is given in the live session, which is what makes the rest possible. But it means:
+
+- The bridge reads commands from a **plain file in your Script Extender folder**. Anything running on your machine that can write there can run Lua in your game. There is no authentication, because a file mailbox cannot have any.
+- Lua under the Script Extender can read and write files, so this is not sandboxed to the game.
+- Whatever agent you connect can do all of it without asking you first.
+
+None of that is a problem while you are actively modding, which is the only situation it is built for. It is a bad thing to leave installed and forgotten.
+
+**Uninstall it when you are done:**
+
+```bash
+node scripts/install-dev.mjs --uninstall
+```
+
+Then remove the server from your agent's MCP config. `bg3_bridge_status` will tell you whether it is currently live.
+
+Treat it the way you would treat a debug console you deliberately switched on: useful, powerful, and not something to leave running in the background.
+
 ## Requirements
 
 - Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**

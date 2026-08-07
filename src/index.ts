@@ -1,4 +1,8 @@
 #!/usr/bin/env node
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
+import { fileURLToPath } from 'node:url';
+
 import { McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/server';
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod';
@@ -7,7 +11,25 @@ import { callBridge, readHello, type BridgeContext } from './mailbox.js';
 import { listLogFiles, tailLog } from './logs.js';
 import { bridgeDir, logDirectories } from './paths.js';
 
-const VERSION = '0.1.0';
+/**
+ * Read from package.json rather than hardcoded: a duplicated constant silently
+ * drifted and reported 0.1.0 from a 0.2.0 build, which a client would show as
+ * the server's version.
+ */
+function readVersion(): string {
+    try {
+        const here = path.dirname(fileURLToPath(import.meta.url));
+        // Strip a UTF-8 BOM: Windows editors and PowerShell's Set-Content both
+        // write one, and JSON.parse rejects it outright.
+        const raw = readFileSync(path.join(here, '..', 'package.json'), 'utf8').replace(/^﻿/, '');
+        const manifest = JSON.parse(raw) as { version?: string };
+        return manifest.version ?? '0.0.0';
+    } catch {
+        return '0.0.0';
+    }
+}
+
+const VERSION = readVersion();
 
 const contextSchema = z
     .enum(['server', 'client'])
