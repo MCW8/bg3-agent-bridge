@@ -30,13 +30,23 @@ Writes are atomic (temp file plus rename) so neither side reads a half-written m
 ## Requirements
 
 - Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se)
-- **[Node.js](https://nodejs.org/) 20 or newer** — the server is a Node program, so this is the one hard prerequisite. Install the LTS build; the default options are fine. Open a *new* terminal afterwards and check:
+- **[Node.js](https://nodejs.org/) 20 or newer** — the server is a Node program, so this is the one hard prerequisite.
+
+  Open PowerShell and run:
+
+  ```bash
+  winget install OpenJS.NodeJS.LTS
+  ```
+
+  `winget` ships with Windows 10 and 11. If it is missing, download the **LTS** installer from [nodejs.org](https://nodejs.org/) and click through it — the defaults are correct.
+
+  **Then close that window and open a new one.** Installers only update `PATH` for terminals opened afterwards, so an existing window will keep insisting `node` is not recognised. Check in the new window:
 
   ```bash
   node --version
   ```
 
-  If that prints a version, you are set. If it says "not recognized", Node either is not installed or the terminal predates the install.
+  Anything `v20` or higher is fine.
 
 You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Those are only for building your own `.pak` later.
 
