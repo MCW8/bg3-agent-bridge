@@ -91,13 +91,20 @@ That last one is the best first diagnostic: it talks to the game directly, so it
 
 ## Connecting your AI agent
 
-Open a terminal **in the folder you extracted** — the one containing `scripts` and `dist` — and run:
+**Simplest route: let the agent do it.** Open a terminal in the folder you extracted — the one containing `scripts` and `dist` — and run:
 
 ```bash
 node scripts/configure-agent.mjs
 ```
 
-That prints the config block with your actual install path already filled in, so there is no path to work out. Or have it written for you:
+That prints a config block with your actual install path already in it. Paste that into a chat with your agent and ask it to add the server to its own MCP config. Most agents know where their config lives, will create it if missing, and will validate it — that is how this was first set up under Kimi Code, and it took one message.
+
+Then restart the agent.
+
+<details>
+<summary>Or have the script write it directly</summary>
+
+Useful if your agent cannot edit its own config:
 
 ```bash
 node scripts/configure-agent.mjs --list                 # known configs, and whether each exists
@@ -114,6 +121,8 @@ node scripts/configure-agent.mjs --path "C:/Users/you/.some-agent/mcp.json"
 ```
 
 It backs the file up first, merges rather than overwrites — other servers and unrelated settings survive — creates the file if it does not exist yet, and is safe to re-run.
+
+</details>
 
 <details>
 <summary>Doing it by hand</summary>

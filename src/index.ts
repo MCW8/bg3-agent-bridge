@@ -123,18 +123,35 @@ function registerTools(server: McpServer): void {
                 'Search the game\'s root templates — items, characters, scenery, projectiles — by name. Templates carry ' +
                 'cross-references that resources do not: Stats links to the stat entry, VisualTemplate to the visual GUID, ' +
                 'and ParentTemplateId to what it inherits from, so one search gives you the whole graph for an item. Use the ' +
-                'returned Id with bg3_preview_item to see it worn.',
+                'returned Id with bg3_preview_item to see it worn. Results include the readable DisplayName, which is how you ' +
+                'tell the right hit from a hundred scenery props. Pass templateType=item when hunting equipment — it removes ' +
+                'most of the noise.',
             inputSchema: z.object({
-                query: z.string().optional().describe('Case-insensitive substring matched against the template name, e.g. "ARM_Plate"'),
+                query: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Name to look for. Spaces, underscores and case are ignored, so the in-game name usually works: ' +
+                            '"Blood of Lathander" finds UNI_CRE_HUM_Sun_Mace_BloodOfLathander.',
+                    ),
                 templateType: z
                     .string()
                     .optional()
                     .describe('Restrict by type: item, character, scenery, projectile, light, trigger, prefab, decal, surface'),
+                searchDisplayNames: z
+                    .boolean()
+                    .default(false)
+                    .describe(
+                        'Also match against localised display names. Catches items whose internal name shares nothing with ' +
+                            'what players call them, at the cost of resolving a localised string per template — try it when a ' +
+                            'normal search comes up empty.',
+                    ),
                 limit: z.number().int().min(1).max(200).default(25).describe('Maximum returned; matches are counted in full'),
                 context: contextSchema,
             }),
         },
-        async ({ query, templateType, limit, context }) => bridge(context, 'template.find', { query, templateType, limit }),
+        async ({ query, templateType, searchDisplayNames, limit, context }) =>
+            bridge(context, 'template.find', { query, templateType, searchDisplayNames, limit }),
     );
 
     defineTool(
