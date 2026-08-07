@@ -81,7 +81,27 @@ That last one is the best first diagnostic: it talks to the game directly, so it
 
 ## Connecting your AI agent
 
-MCP clients all read the same JSON shape, but each keeps it somewhere different. Use the **full absolute path** to `dist/index.js`, with forward slashes:
+You never need to type a path. This prints the config block with your actual install path already filled in:
+
+```bash
+node scripts/configure-agent.mjs
+```
+
+Or have it written into a client's config file for you:
+
+```bash
+node scripts/configure-agent.mjs --list            # what it can write, and whether each exists
+node scripts/configure-agent.mjs --write claude-desktop
+node scripts/configure-agent.mjs --write cursor
+node scripts/configure-agent.mjs --write project   # .mcp.json in the current folder
+```
+
+It backs the file up first, merges rather than overwrites — other servers and unrelated settings survive — and is safe to re-run.
+
+<details>
+<summary>Doing it by hand</summary>
+
+Every MCP client reads the same shape; they differ only in where it lives.
 
 ```json
 {
@@ -96,16 +116,16 @@ MCP clients all read the same JSON shape, but each keeps it somewhere different.
 
 | Client | Where that goes |
 |---|---|
-| **Claude Code** | `claude mcp add bg3-agent-bridge -- node C:/path/to/dist/index.js`, or a `.mcp.json` in your project root |
+| **Claude Code** | `claude mcp add bg3-agent-bridge -- node C:/path/to/dist/index.js`, or `.mcp.json` in the project root |
 | **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
 | **Cursor** | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` globally |
-| **Anything else** | Look for its MCP or "servers" settings — most accept the block above verbatim |
+| **Anything else** | Search its docs for `mcpServers` — that key is the common denominator |
 
-If your client is not listed, search its docs for `mcpServers`; that key is the common denominator.
+Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character and will break the file, usually without a useful error.
 
-**Check it registered** before blaming the bridge — most clients list connected servers and their tools somewhere in the UI. You are looking for `bg3-agent-bridge` and 14 tools beginning `bg3_`. If they are missing, the problem is the config file, not the game.
+</details>
 
-Two things that catch people out: restart the client after editing config, and use `/` or escaped `\\` in JSON paths — a single backslash is an escape character and will break the file silently.
+**Confirm it registered** before blaming the bridge — most clients list connected servers somewhere in their UI. You want `bg3-agent-bridge` with 14 tools named `bg3_*`. If they are absent, the problem is the config, not the game. **Restart the client after editing config**; almost none reload it live.
 
 ## Building your own mods
 
