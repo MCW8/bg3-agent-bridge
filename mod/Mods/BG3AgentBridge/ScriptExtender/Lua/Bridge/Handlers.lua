@@ -367,15 +367,47 @@ H["audio.post"] = function(params)
     return result
 end
 
+--- Collapse a name to letters and digits so that what a player types matches
+--- what Larian named the asset. "Blood of Lathander" and
+--- "UNI_CRE_HUM_Sun_Mace_BloodOfLathander" only meet after spaces, underscores
+--- and case are removed.
+local function normalize(text)
+    return (string.gsub(string.lower(tostring(text)), "[^%w]", ""))
+end
+
+--- Templates carry DisplayName as a TranslatedString, which has to be resolved
+--- to the localised text a player would recognise. Returns nil when there is
+--- none, which is most scenery.
+local function displayNameOf(template)
+    local ok, value = pcall(function()
+        return template.DisplayName:Get()
+    end)
+    if not ok or value == nil then
+        return nil
+    end
+    local text = tostring(value)
+    if text == "" then
+        return nil
+    end
+    return text
+end
+
 H["template.find"] = function(params)
     local all = Ext.Template.GetAllRootTemplates()
 
     local needle = params.query
+    local needleNormalized = nil
     if type(needle) == "string" and needle ~= "" then
         needle = string.lower(needle)
+        needleNormalized = normalize(needle)
     else
         needle = nil
     end
+
+    -- Resolving a localised string for all ~32k templates is not free, so
+    -- searching display names is opt-in. Returned entries always carry theirs,
+    -- which costs nothing at a capped result count.
+    local searchDisplayNames = params.searchDisplayNames == true
 
     local wantType = params.templateType
     if type(wantType) ~= "string" or wantType == "" then
@@ -411,7 +443,25 @@ H["template.find"] = function(params)
         end)
 
         local typeOk = wantType == nil or (templateType ~= nil and string.lower(templateType) == string.lower(wantType))
-        local nameOk = needle == nil or (name ~= nil and string.find(string.lower(name), needle, 1, true) ~= nil)
+
+        local nameOk = needle == nil
+        if not nameOk and name ~= nil then
+            -- Plain substring first, then the normalised form, so a query typed
+            -- the way it reads in game still finds an underscored asset name.
+            nameOk = string.find(string.lower(name), needle, 1, true) ~= nil
+                or string.find(normalize(name), needleNormalized, 1, true) ~= nil
+        end
+
+        -- Only pay for localisation lookups when asked, and only for entries
+        -- the name match did not already claim.
+        local displayName = nil
+        if typeOk and not nameOk and searchDisplayNames then
+            displayName = displayNameOf(template)
+            if displayName ~= nil then
+                nameOk = string.find(string.lower(displayName), needle, 1, true) ~= nil
+                    or string.find(normalize(displayName), needleNormalized, 1, true) ~= nil
+            end
+        end
 
         if typeOk and nameOk then
             matched = matched + 1
@@ -426,17 +476,22 @@ H["template.find"] = function(params)
                     end)
                     if ok and value ~= nil then
                         local t = type(value)
-                        if t == "string" or t == "number" or t == "boolean" then
-                            entry[key] = value
-                        else
-                            local text = tostring(value)
-                            -- skip opaque userdata addresses, keep real ids
-                            if not string.find(text, "(0000", 1, true) then
-                                entry[key] = text
-                            end
+                        local text = (t == "string" or t == "number" or t == "boolean") and value or tostring(value)
+                        -- Drop noise: opaque userdata addresses, empty strings,
+                        -- and all-zero GUIDs, all of which just cost the caller
+                        -- context to read past.
+                        local asString = tostring(text)
+                        if asString ~= ''
+                            and asString ~= '00000000-0000-0000-0000-000000000000'
+                            and not string.find(asString, '(0000', 1, true)
+                        then
+                            entry[key] = text
                         end
                     end
                 end
+                -- Always include the human-readable name for what is returned:
+                -- it is what lets the caller tell the right hit from 173 others.
+                entry.DisplayName = displayName or displayNameOf(template)
                 results[#results + 1] = entry
             end
         end
