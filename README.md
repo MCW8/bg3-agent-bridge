@@ -79,7 +79,24 @@ No mod manager and no packing. Loose is the right mode for modding anyway: **a p
 
 `node scripts/install-dev.mjs --uninstall` reverses it. Set `BG3_GAME_DIR` if your install is somewhere unusual.
 
-**3. Tell your AI agent about the server** — see the next section.
+**3. Ask your agent to connect itself**
+
+That script finishes by printing a config block with your real install path already in it, like this:
+
+```json
+{
+  "mcpServers": {
+    "bg3-agent-bridge": {
+      "command": "node",
+      "args": ["C:/Users/you/bg3-agent-bridge/dist/index.js"]
+    }
+  }
+}
+```
+
+**Copy it, paste it into a chat with your AI agent, and ask it to add this to its MCP config.** Most agents know where their own config lives, will create the file if it does not exist, and will validate the JSON afterwards. Then restart the agent.
+
+That is genuinely the whole step — it is how this was first connected to Kimi Code, in one message. See [Connecting your AI agent](#connecting-your-ai-agent) if yours cannot edit its own config.
 
 **4. Verify** — launch the game, load a save, and ask your agent to call `bg3_bridge_status`. Or, with no agent involved at all:
 

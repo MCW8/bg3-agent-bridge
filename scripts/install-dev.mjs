@@ -217,21 +217,28 @@ function main() {
     const entryPoint = path.join(packageRoot, 'dist', 'index.js');
     const entryForJson = entryPoint.replace(/\\/g, '/');
 
-    console.log('\n  Next: add this to your AI agent\'s MCP config\n');
+    console.log('\n  ─────────────────────────────────────────────────────────────────');
+    console.log('   NEXT: copy everything between the lines and paste it to your AI');
+    console.log('   agent, asking it to add this to its MCP config.');
+    console.log('  ─────────────────────────────────────────────────────────────────\n');
     console.log(
         JSON.stringify({ mcpServers: { 'bg3-agent-bridge': { command: 'node', args: [entryForJson] } } }, null, 2)
             .split('\n')
-            .map((line) => `    ${line}`)
+            .map((line) => `  ${line}`)
             .join('\n'),
     );
+    console.log('\n  ─────────────────────────────────────────────────────────────────\n');
     console.log(
-        '\n  Or have it written for you:\n' +
+        '  Most agents know where their own config lives, will create it if it does\n' +
+            '  not exist, and will check the JSON afterwards. Restart the agent when it\n' +
+            '  is done.\n\n' +
+            '  If yours cannot edit its own config, write it directly:\n' +
             '    node scripts/configure-agent.mjs --list\n\n' +
             '  Then launch Baldur\'s Gate 3, load a save, and ask your agent for\n' +
-            '  bg3_bridge_status. With no agent involved:\n' +
+            '  bg3_bridge_status. To check without any agent involved:\n' +
             '    node scripts/check-bridge.mjs\n\n' +
-            '  Editing the Lua under mod/ and re-running this script picks changes up on\n' +
-            '  the next bg3_reload, with no game restart.\n',
+            '  While modding: edit the Lua under mod/, re-run this script, and the\n' +
+            '  changes apply on the next bg3_reload without restarting the game.\n',
     );
 }
 
