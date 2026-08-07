@@ -132,7 +132,10 @@ function registerTools(server: McpServer): void {
                     .optional()
                     .describe(
                         'Name to look for. Spaces, underscores and case are ignored, so the in-game name usually works: ' +
-                            '"Blood of Lathander" finds UNI_CRE_HUM_Sun_Mace_BloodOfLathander.',
+                            '"Blood of Lathander" finds UNI_CRE_HUM_Sun_Mace_BloodOfLathander. If nothing matches exactly, ' +
+                            'it retries allowing typos — "Sword of Justise" still finds Sword of Justice. Those results are ' +
+                            'flagged with fuzzy:true and carry a fuzzyDistance, closest first. More words rank better than ' +
+                            'fewer: one vague word can match a hundred props.',
                     ),
                 templateType: z
                     .string()

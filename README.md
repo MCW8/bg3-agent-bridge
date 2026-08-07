@@ -261,6 +261,21 @@ Sounds attached to a spell are exposed as stat fields and are straightforward to
 
 **`bg3_play_sound` is a development tool, not a player-facing feature.** It fires when the tool is called from outside the game; nothing is bound to input and the person playing gets no control from it. Letting a player trigger sounds at will is a mod — the same `Ext.Audio.PostEvent` call, bound to a spell, item or console command.
 
+## Finding things by the name you remember
+
+Asset names are not the names players use. `bg3_find_template` therefore ignores spaces, underscores and case, and falls back to typo-tolerant matching when nothing matches literally:
+
+```
+"Blood of Lathander"   1 match, exact       UNI_CRE_HUM_Sun_Mace_BloodOfLathander
+"Blood of Lathandar"   4 matches, fuzzy     the mace first, distance 1
+"Sword of Justise"     1 match,  fuzzy      UNI_PLA_WPN_SwordOfJustice
+"Grateaxe"            16 matches, fuzzy     every greataxe, distance 2
+```
+
+The fuzzy pass only runs when the literal one finds nothing, so the usual case stays at ~110ms and typos cost ~350ms. Every word of the query has to match something, which is what ranks sensibly: `"blood lathandar"` puts the mace above a Lathander portrait, because nothing in the portrait resembles "blood". A single vague word cannot do that — `"Lathandar"` alone returns 44 hits in arbitrary order.
+
+Results carry the resolved `DisplayName`, which is usually the only practical way to tell `UNI_CRE_HUM_Sun_Mace_BloodOfLathander` from 173 other hits.
+
 ## Looking at items and armour
 
 Templates carry cross-references that resources do not, so one search yields the whole graph:

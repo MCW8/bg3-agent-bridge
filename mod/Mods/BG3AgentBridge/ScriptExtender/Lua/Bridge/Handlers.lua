@@ -392,6 +392,115 @@ local function displayNameOf(template)
     return text
 end
 
+--- Split an asset name into the words a person would recognise.
+--- "UNI_CRE_HUM_Sun_Mace_BloodOfLathander" becomes
+--- uni, cre, hum, sun, mace, blood, of, lathander — which is what makes typo
+--- matching feasible, since comparing a query against the whole mangled name
+--- would always look wildly different.
+local function tokenize(name)
+    local spaced = string.gsub(tostring(name), '(%l)(%u)', '%1 %2')
+    local tokens = {}
+    for word in string.gmatch(string.lower(spaced), '[%w]+') do
+        tokens[#tokens + 1] = word
+    end
+    return tokens
+end
+
+--- Levenshtein distance, abandoned as soon as it exceeds `maxDistance`.
+--- The early exits matter: this runs across tens of thousands of candidates.
+local function editDistance(a, b, maxDistance)
+    local la, lb = #a, #b
+    if math.abs(la - lb) > maxDistance then
+        return maxDistance + 1
+    end
+
+    local previous, current = {}, {}
+    for j = 0, lb do
+        previous[j] = j
+    end
+
+    for i = 1, la do
+        current[0] = i
+        local best = i
+        local byteA = string.byte(a, i)
+        for j = 1, lb do
+            local cost = (byteA == string.byte(b, j)) and 0 or 1
+            local value = math.min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + cost)
+            current[j] = value
+            if value < best then
+                best = value
+            end
+        end
+        if best > maxDistance then
+            return maxDistance + 1
+        end
+        previous, current = current, previous
+    end
+
+    return previous[lb]
+end
+
+--- Score a candidate against an already-tokenized query.
+---
+--- Every query token has to find a near match among the candidate's tokens, and
+--- the score is the total distance. Requiring all of them is what ranks
+--- correctly: "blood lathandar" scores 1 against the mace, while a Lathander
+--- portrait fails outright because nothing there resembles "blood". Matching on
+--- any single token would rank them equal.
+---
+--- Returns nil when the candidate does not qualify.
+local function fuzzyScore(text, queryTokens)
+    local candidateTokens = tokenize(text)
+    if #candidateTokens == 0 then
+        return nil
+    end
+
+    local total = 0
+    for _, queryToken in ipairs(queryTokens) do
+        -- Tolerance scales with token length: roughly one edit per four
+        -- characters.
+        --
+        -- A flat two-edit allowance was tried and measured worse. It rescued
+        -- double typos like "bludd" for "blood", but at two edits "blood" also
+        -- reaches "bld" — an abbreviation littered through scenery names — so
+        -- "Blood of Lathandar" went from four hits with the right one first to
+        -- fifteen with a gemstone on top. Catching one more typo is not worth
+        -- burying the answer.
+        local tolerance = math.max(1, math.floor(#queryToken / 4))
+        local best = nil
+
+        for _, candidateToken in ipairs(candidateTokens) do
+            local distance = editDistance(candidateToken, queryToken, tolerance)
+            if distance <= tolerance and (best == nil or distance < best) then
+                best = distance
+                if best == 0 then
+                    break
+                end
+            end
+        end
+
+        if best == nil then
+            return nil
+        end
+        total = total + best
+    end
+
+    return total
+end
+
+--- Query tokens worth matching on. Words under three characters ("of", "a")
+--- are dropped: they carry no signal and would fail a candidate that simply
+--- spells the name without them.
+local function queryTokensFor(query)
+    local tokens = {}
+    for _, token in ipairs(tokenize(query)) do
+        if #token >= 3 then
+            tokens[#tokens + 1] = token
+        end
+    end
+    return tokens
+end
+
 H["template.find"] = function(params)
     local all = Ext.Template.GetAllRootTemplates()
 
@@ -497,11 +606,80 @@ H["template.find"] = function(params)
         end
     end
 
+    -- Nothing matched literally, so the query is probably misspelled or
+    -- half-remembered. Only now is a fuzzy sweep worth its cost, and paying it
+    -- exactly when the alternative is an empty answer is a good trade.
+    local fuzzy = false
+    local queryTokens = needle ~= nil and queryTokensFor(needle) or {}
+    if matched == 0 and #queryTokens > 0 then
+        fuzzy = true
+        local scored = {}
+
+        for _, template in pairs(all) do
+            local name, templateType
+            pcall(function()
+                name = tostring(template.Name)
+            end)
+            pcall(function()
+                templateType = tostring(template.TemplateType)
+            end)
+
+            local typeOk = wantType == nil
+                or (templateType ~= nil and string.lower(templateType) == string.lower(wantType))
+
+            if typeOk and name ~= nil then
+                local score = fuzzyScore(name, queryTokens)
+                if score == nil and searchDisplayNames then
+                    local shown = displayNameOf(template)
+                    if shown ~= nil then
+                        score = fuzzyScore(shown, queryTokens)
+                    end
+                end
+                if score ~= nil then
+                    scored[#scored + 1] = { template = template, score = score }
+                end
+            end
+        end
+
+        -- Closest first, so the intended item leads even when several are near.
+        table.sort(scored, function(a, b)
+            return a.score < b.score
+        end)
+
+        matched = #scored
+        for index = 1, math.min(limit, #scored) do
+            local template = scored[index].template
+            local entry = { fuzzyDistance = scored[index].score }
+            pcall(function()
+                entry.Id = tostring(template.Id)
+            end)
+            for _, key in ipairs(fields) do
+                local ok, value = pcall(function()
+                    return template[key]
+                end)
+                if ok and value ~= nil then
+                    local asString = tostring(value)
+                    if asString ~= ''
+                        and asString ~= '00000000-0000-0000-0000-000000000000'
+                        and not string.find(asString, '(0000', 1, true)
+                    then
+                        entry[key] = (type(value) == 'string' or type(value) == 'number' or type(value) == 'boolean')
+                            and value
+                            or asString
+                    end
+                end
+            end
+            entry.DisplayName = displayNameOf(template)
+            results[#results + 1] = entry
+        end
+    end
+
     return {
         scanned = scanned,
         matched = matched,
         returned = #results,
         truncated = matched > #results,
+        fuzzy = fuzzy or nil,
         elapsedMs = started and (clock() - started) or nil,
         templates = results,
     }
@@ -630,6 +808,47 @@ end
 --- keeps its stats, armour class and boosts, and several more components crash
 --- the game if copied. We copy nothing, spawn with temporary=1, and put the
 --- original back afterwards.
+--- Equipment slots as Osiris names them. Note these are NOT the names an item's
+--- Equipable component reports: a weapon's component says "MeleeMainHand" while
+--- Osi.GetEquippedItem only answers to "Melee Main Weapon". Armour happens to
+--- agree ("Breast"), which is why an earlier version appeared to work.
+local OSIRIS_SLOTS = {
+    'Helmet',
+    'Breast',
+    'Cloak',
+    'Gloves',
+    'Boots',
+    'Underwear',
+    'Amulet',
+    'Ring',
+    'Ring2',
+    'MusicalInstrument',
+    'VanityBody',
+    'VanityBoots',
+    'Melee Main Weapon',
+    'Melee Offhand Weapon',
+    'Ranged Main Weapon',
+    'Ranged Offhand Weapon',
+}
+
+--- What is worn right now, keyed by Osiris slot name.
+---
+--- Snapshotting everything and diffing afterwards avoids translating between
+--- the two slot vocabularies at all — whichever slot changed is the one the
+--- game chose, and its previous occupant is what has to go back.
+local function snapshotEquipment(character)
+    local worn = {}
+    for _, slot in ipairs(OSIRIS_SLOTS) do
+        local ok, item = pcall(function()
+            return Osi.GetEquippedItem(character, slot)
+        end)
+        if ok and item ~= nil and item ~= '' and tostring(item) ~= 'nil' then
+            worn[slot] = tostring(item)
+        end
+    end
+    return worn
+end
+
 local preview = {
     active = false,
     character = nil,
@@ -639,6 +858,7 @@ local preview = {
     template = nil,
     equipped = false,
     lastError = nil,
+    before = nil,
 }
 
 local function previewStatus()
@@ -719,6 +939,10 @@ H["item.preview"] = function(params)
         character = Osi.GetHostCharacter()
     end
 
+    -- Record what is worn before anything changes; the diff after equipping is
+    -- what identifies both the slot and the item to restore.
+    local before = snapshotEquipment(character)
+
     -- temporary=1 so the engine treats it as disposable, playSpawn=0 to skip
     -- the spawn animation and sound.
     local spawned = Osi.CreateAt(template.Id, 0, 0, 0, 1, 0, "")
@@ -734,41 +958,38 @@ H["item.preview"] = function(params)
     preview.originalItem = nil
     preview.slot = params.slot
     preview.lastError = nil
+    preview.before = before
 
     -- Equipping immediately fails: the engine is still populating the entity.
     -- Armory found by experiment that a tick and 10ms are both too early and
     -- settled on 50ms, which matches what we see.
     Ext.Timer.WaitFor(50, function()
         local ok, err = pcall(function()
-            -- Read the slot from the item's Equipable component, not from
-            -- Osi.GetEquipmentSlotForItem: the latter returns an enum index
-            -- ("1") that GetEquippedItem does not accept, so the original was
-            -- silently never recorded and restore had nothing to put back.
-            local slot = preview.slot
-            if type(slot) ~= "string" or slot == "" then
-                local entity = Ext.Entity.Get(preview.previewItem)
-                if entity ~= nil then
-                    pcall(function()
-                        slot = tostring(entity.Equipable.Slot)
-                    end)
-                end
-                preview.slot = (type(slot) == "string" and slot ~= "") and slot or nil
-            end
-
-            if preview.slot ~= nil then
-                local current = Osi.GetEquippedItem(preview.character, preview.slot)
-                if current ~= nil and current ~= "" then
-                    preview.originalItem = tostring(current)
-                end
-            end
-
             Osi.Equip(preview.character, preview.previewItem, 1, 0, 1)
             preview.equipped = true
         end)
 
         if not ok then
             preview.lastError = tostring(err)
+            return
         end
+
+        -- Equipping settles a moment after the call, so read the result on a
+        -- second timer rather than immediately.
+        Ext.Timer.WaitFor(150, function()
+            pcall(function()
+                local after = snapshotEquipment(preview.character)
+                for slot, occupant in pairs(after) do
+                    if occupant == preview.previewItem then
+                        preview.slot = slot
+                        -- Whatever was in this slot beforehand is what restore
+                        -- has to put back. Absent means the slot was empty.
+                        preview.originalItem = preview.before and preview.before[slot] or nil
+                    end
+                end
+                preview.before = nil
+            end)
+        end)
     end)
 
     local status = previewStatus()
