@@ -29,7 +29,9 @@ Writes are atomic (temp file plus rename) so neither side reads a half-written m
 
 ## Requirements
 
-- Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se)
+- Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**
+
+  The Script Extender updates itself by default, so a current install already qualifies. If yours is older the mod will not load at all — that is the extender's own behaviour for `RequiredVersion`, not something this can work around gracefully.
 - **[Node.js](https://nodejs.org/) 20 or newer** — the server is a Node program, so this is the one hard prerequisite.
 
   Open PowerShell and run:
@@ -335,6 +337,16 @@ Its counterpart is spelled `Osi.RemoveCustomVisualOvirride` — Larian's typo, n
 `bg3_preview_item` does the light version of the same thing, since a preview does not have to stay playable. It spawns the template with `temporary=1`, equips it, moves the original to inventory, and restores on request. Two consequences worth knowing: the preview is a **real item with its own stats**, so previewing plate over leather genuinely changes armour class — don't do it mid-combat — and an un-restored preview leaves the original sitting in inventory.
 
 Slot detection reads the item's `Equipable.Slot`, which reports `Breast`. `Osi.GetEquipmentSlotForItem` returns an enum index (`1`) that `GetEquippedItem` will not accept.
+
+## A note on RequiredVersion
+
+`ScriptExtender/Config.json` declares `"RequiredVersion": 32`, and that number does more than gate loading. From the Script Extender docs:
+
+> use the version number of the Script Extender you used for developing the mod **since the behavior of new features and backwards compatibility functions depends on this version number**
+
+So a low number is not the cautious choice it looks like — it asks the extender to run your mod under old-version compatibility behaviour. This started life at `7`, copied from a working mod without checking, which meant a v32 runtime was applying v7 semantics to everything here.
+
+The extender's API version tracks its release number; the installed build reports it as the file version of `BG3ScriptExtender.dll` in `%LOCALAPPDATA%\BG3ScriptExtender\`. Set it to whatever you actually developed and tested against.
 
 ## On the reference dumps
 
