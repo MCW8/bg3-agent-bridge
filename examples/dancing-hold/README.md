@@ -31,6 +31,23 @@ Reading both stat entries out of the running game is what made this visible in a
 
 Worth knowing: `IRRESISTIBLE_DANCE` is a `BOOST`, not `INCAPACITATED` — Otto's is genuinely weaker than Hold Person. This inherits Hold Person, so it is the stronger mechanics with the dance appearance. Inherit `IRRESISTIBLE_DANCE` instead if you want Otto's actual strength.
 
+## Changing the visual, and where that stops
+
+`StatusEffect` points at a `MultiEffectInfo`, and swapping it on a loaded status works live — one call, watch, repeat. That makes trying existing effects cheap.
+
+What is **not** possible is subtracting part of one. Hold Person's composite has exactly one entry:
+
+```
+HOLD_PERSON_StatusEffect
+  └─ EffectInfo: [ 1 ] → VFX_Status_HoldPerson_01.lsfx
+```
+
+The ethereal chains, the floor box and the pink body glow are all baked into that single `.lsfx`. There is nothing to drop. Separating them means editing the effect file in the Toolkit's VFX editor.
+
+Authoring a *new* `MultiEffectInfo` that combines existing effects is different, and does not need the Toolkit — it is an `.lsf` resource like any other. But it has to ship in the mod: `Ext.StaticData.Create` will build one at runtime and read it back correctly, and the engine still will not resolve it. Worse, a status whose `StatusEffect` cannot be resolved **fails to apply at all**, rather than appearing without visuals — so a bad GUID looks like a broken status, not a missing effect.
+
+The workaround for iterating, if you need it: ship several candidate `MultiEffectInfo` resources in the mod at once, restart, then swap `StatusEffect` between them live. One restart buys as many live comparisons as you shipped candidates.
+
 ## A limit found while building this
 
 `Ext.Stats.Create` will compose a new status at runtime, and reading it back shows every field resolved correctly — but **it cannot be applied**. The engine builds status prototypes at load, so `Osi.ApplyStatus` silently does nothing for one created mid-session, with no error logged. A control test with a shipped status confirmed the call itself was fine.
