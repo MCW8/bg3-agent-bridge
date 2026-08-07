@@ -30,20 +30,24 @@ Writes are atomic (temp file plus rename) so neither side reads a half-written m
 ## Requirements
 
 - Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se)
-- Node.js 20+
-- A mod manager such as [BG3 Mod Manager](https://github.com/LaughingLeader/BG3ModManager)
+- **[Node.js](https://nodejs.org/) 20 or newer** — the server is a Node program, so this is the one hard prerequisite. Install the LTS build; the default options are fine. Open a *new* terminal afterwards and check:
 
-**You do not need `divine.exe` to install this.** It is only needed to build a `.pak`, and the release ships one prebuilt. See [Building your own mods](#building-your-own-mods) if you want it for your own work.
+  ```bash
+  node --version
+  ```
+
+  If that prints a version, you are set. If it says "not recognized", Node either is not installed or the terminal predates the install.
+
+You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Those are only for building your own `.pak` later.
 
 ## Install
 
-**1. Install the mod half**
+**1. Get the files**
 
-Download `BG3AgentBridge.pak` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases), drop it in your `Mods` folder, enable **BG3 Agent Bridge** in your mod manager, and export the load order. Exactly like any other mod.
+Download `bg3-agent-bridge-v0.1.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere — your Documents folder is fine. It ships already built, so there is nothing to compile.
 
-The installer deliberately **never edits `modsettings.lsx` itself** — rewriting a load order in place is the easiest way to break an install, and the game rewrites that file from memory on exit, so edits made while it is running can vanish.
-
-**2. Install the server half**
+<details>
+<summary>From source instead (needs git and npm)</summary>
 
 ```bash
 git clone https://github.com/MCW8/bg3-agent-bridge
@@ -51,34 +55,57 @@ cd bg3-agent-bridge
 npm install && npm run build
 ```
 
-**3. Point your MCP client at it**
+</details>
+
+**2. Install the mod, with the game closed**
+
+```bash
+node scripts/install-dev.mjs
+```
+
+That finds your BG3 install, copies the companion mod into `Data\Mods\` as loose files, and adds it to `modsettings.lsx` — backing that file up first, and refusing to run while the game is open, because the game rewrites it from memory on exit.
+
+No mod manager and no packing. Loose is the right mode for modding anyway: **a packed mod's Lua cannot be hot-reloaded**, since the pak is read once at startup, so `bg3_reload` would just re-read the same bytes. Loose files mean your edits apply on the next reload.
+
+`node scripts/install-dev.mjs --uninstall` reverses it. Set `BG3_GAME_DIR` if your install is somewhere unusual.
+
+**3. Tell your AI agent about the server** — see the next section.
+
+**4. Verify** — launch the game, load a save, and ask your agent to call `bg3_bridge_status`. Or, with no agent involved at all:
+
+```bash
+node scripts/check-bridge.mjs
+```
+
+That last one is the best first diagnostic: it talks to the game directly, so it separates "the bridge is broken" from "my agent is not wired up".
+
+## Connecting your AI agent
+
+MCP clients all read the same JSON shape, but each keeps it somewhere different. Use the **full absolute path** to `dist/index.js`, with forward slashes:
 
 ```json
 {
   "mcpServers": {
     "bg3-agent-bridge": {
       "command": "node",
-      "args": ["C:/full/path/to/bg3-agent-bridge/dist/index.js"]
+      "args": ["C:/Users/you/bg3-agent-bridge/dist/index.js"]
     }
   }
 }
 ```
 
-An absolute path is the reliable form. The repo's own `.mcp.json` uses a relative one, which works when the client launches the server from the project root.
+| Client | Where that goes |
+|---|---|
+| **Claude Code** | `claude mcp add bg3-agent-bridge -- node C:/path/to/dist/index.js`, or a `.mcp.json` in your project root |
+| **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
+| **Cursor** | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` globally |
+| **Anything else** | Look for its MCP or "servers" settings — most accept the block above verbatim |
 
-**4. Verify** — launch the game, load a save, then call `bg3_bridge_status`.
+If your client is not listed, search its docs for `mcpServers`; that key is the common denominator.
 
-<details>
-<summary><strong>Running loose instead, for faster iteration</strong></summary>
+**Check it registered** before blaming the bridge — most clients list connected servers and their tools somewhere in the UI. You are looking for `bg3-agent-bridge` and 14 tools beginning `bg3_`. If they are missing, the problem is the config file, not the game.
 
-The engine loads loose module folders from the game's own `Data\Mods\` directory — that is where Larian's `GustavDev` and `SharedDev` live. Skipping the pak means edited Lua applies on the next `bg3_reload` with no rebuild:
-
-1. Copy `mod\Mods\BG3AgentBridge` to `<BG3 install>\Data\Mods\BG3AgentBridge`
-2. Add a `ModuleShortDesc` entry for it to `modsettings.lsx`, **with the game closed**
-
-A packed mod's Lua cannot be hot-reloaded — the pak is read at startup, so `bg3_reload` re-reads the same bytes.
-
-</details>
+Two things that catch people out: restart the client after editing config, and use `/` or escaped `\\` in JSON paths — a single backslash is an escape character and will break the file silently.
 
 ## Building your own mods
 
