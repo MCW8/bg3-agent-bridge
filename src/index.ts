@@ -116,6 +116,75 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_find_static_data',
+        {
+            title: 'Search static game data',
+            description:
+                'Search a static data type by name — a third data layer beside resources and templates, holding what neither ' +
+                'exposes. Most useful: MultiEffectInfo (what a status actually looks like), VFX, ManagedStatusVFX, Flag, Tag, ' +
+                'Race, Progression, SpellList, ClassDescription, Feat. Cheap to scan, and typo-tolerant like the other ' +
+                'searches. An invalid type returns the full list of valid ones.',
+            inputSchema: z.object({
+                type: z
+                    .string()
+                    .min(1)
+                    .describe('Static data type, e.g. "MultiEffectInfo", "VFX", "Flag", "Tag", "Race", "SpellList"'),
+                query: z.string().optional().describe('Name to look for; spaces, underscores and case are ignored'),
+                limit: z.number().int().min(1).max(200).default(25).describe('Maximum returned; matches counted in full'),
+                context: contextSchema,
+            }),
+        },
+        async ({ type, query, limit, context }) => bridge(context, 'staticdata.find', { type, query, limit }),
+    );
+
+    defineTool(
+        server,
+        'bg3_find_status_by_effect',
+        {
+            title: 'Find statuses by visual effect',
+            description:
+                'Reverse lookup: given part of a visual effect name, list the statuses that apply it. This is how you get from ' +
+                '"I saw a look I want" to something you can actually use, because a status is rarely named after how it looks — ' +
+                'the ghostly appearance in Oskar\'s quest comes from a status called LOW_OSKARSBELOVED_KERRI_BLUE. Nothing ' +
+                'indexes this direction. Pair with bg3_preview_status to see each candidate.',
+            inputSchema: z.object({
+                query: z
+                    .string()
+                    .min(1)
+                    .describe('Fragment of the effect name, e.g. "ghost", "spectral", "possess", "burn"'),
+                context: contextSchema,
+            }),
+        },
+        async ({ query, context }) => bridge(context, 'status.usingEffect', { query }),
+    );
+
+    defineTool(
+        server,
+        'bg3_preview_status',
+        {
+            title: 'Apply a status to see what it looks like',
+            description:
+                'Audition a status on a character, then clear it — the equivalent of bg3_preview_item for visual effects. ' +
+                'Statuses of type EFFECT are purely cosmetic and safe to try; BOOST and POLYMORPHED change gameplay or the ' +
+                'model, so read statusType before applying. Applied statuses are tracked so action=clear removes everything ' +
+                'this tool put on. ALWAYS clear when done.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['apply', 'remove', 'clear', 'list'])
+                    .default('list')
+                    .describe('apply one, remove one, clear everything this tool applied, or list what is active'),
+                status: z.string().optional().describe('Status name, e.g. "GHOST_FX". Required for apply and remove.'),
+                duration: z.number().default(60).describe('Seconds before it lapses on its own; clear does not wait for this'),
+                character: z.string().optional().describe('Character UUID; defaults to the host character'),
+                context: contextSchema,
+            }),
+        },
+        async ({ action, status, duration, character, context }) =>
+            bridge(context, 'status.preview', { action, status, duration, character }),
+    );
+
+    defineTool(
+        server,
         'bg3_find_template',
         {
             title: 'Search root templates',

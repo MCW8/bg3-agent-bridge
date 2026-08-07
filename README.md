@@ -194,7 +194,10 @@ The `examples/` directory has two worked mods — a spell and an item — each w
 | `bg3_list_mods` | What is actually mounted, in load order — check this first when a mod "isn't working" |
 | `bg3_find_resource` | Search sounds, visuals, materials and effects by name to get their GUIDs |
 | `bg3_find_template` | Search root templates — name to template id, stat entry and visual GUID |
+| `bg3_find_static_data` | Search ~130 static data types — effects, flags, tags, races, spell lists |
+| `bg3_find_status_by_effect` | Reverse lookup: which statuses apply a given visual effect |
 | `bg3_preview_item` | Temporarily wear an item to see how it looks, then restore |
+| `bg3_preview_status` | Apply a status to see its effect, then clear it |
 | `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
 | `bg3_capture_sounds` | Record which sound events the game actually fires — "what sound was that?" |
 | `bg3_eval` | Run a Lua chunk in the live game and get its return values |
@@ -275,6 +278,30 @@ Asset names are not the names players use. `bg3_find_template` therefore ignores
 The fuzzy pass only runs when the literal one finds nothing, so the usual case stays at ~110ms and typos cost ~350ms. Every word of the query has to match something, which is what ranks sensibly: `"blood lathandar"` puts the mace above a Lathander portrait, because nothing in the portrait resembles "blood". A single vague word cannot do that — `"Lathandar"` alone returns 44 hits in arbitrary order.
 
 Results carry the resolved `DisplayName`, which is usually the only practical way to tell `UNI_CRE_HUM_Sun_Mace_BloodOfLathander` from 173 other hits.
+
+## Finding a visual effect you have seen but cannot name
+
+Effects are the hardest thing to search for, because a status is almost never named after how it looks. Working backwards from the effect is what gets there. A real example — finding the green spectral look from Oskar's Beloved:
+
+```
+bg3_find_static_data type=MultiEffectInfo query=possess
+  LOW_OSKARBELOVED_Possession_FX          3,847 scanned, 12ms
+
+bg3_find_status_by_effect query=possess
+  LOW_OSKARSBELOVED_POSSESSING_FX  [EFFECT]  -> LOW_OSKARBELOVED_Possession_FX
+  LOW_GHOST_POSSESSED              [BOOST]   -> LOW_GHOST_POSSESSED_StatusEffect
+
+bg3_preview_status action=apply status=LOW_OSKARSBELOVED_POSSESSING_FX
+bg3_preview_status action=clear
+```
+
+**Nothing in `LOW_OSKARSBELOVED_POSSESSING_FX` says "green", "ghost" or "spectral".** No amount of name searching finds it from what it looks like. The route in is `MultiEffectInfo` → status → wear it, and the last step matters most: candidates are cheap to try, so guessing badly costs seconds.
+
+Which terms you try is the skill. Searching "ghost" finds `GHOST_FX` — a different, bluer effect. Searching "possess" finds this one. Search the *situation* the effect belongs to (a quest name, a creature, a condition) as well as the appearance, since that is how Larian names things.
+
+`bg3_find_static_data` covers roughly 130 types beyond effects: `VFX`, `Flag`, `Tag`, `Race`, `Progression`, `SpellList`, `ClassDescription`, `Feat`. An invalid type name returns the full list.
+
+Check `statusType` before applying. `EFFECT` is purely cosmetic; `BOOST` changes gameplay and `POLYMORPHED` replaces the model.
 
 ## Looking at items and armour
 
