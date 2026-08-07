@@ -91,22 +91,29 @@ That last one is the best first diagnostic: it talks to the game directly, so it
 
 ## Connecting your AI agent
 
-You never need to type a path. This prints the config block with your actual install path already filled in:
+Open a terminal **in the folder you extracted** — the one containing `scripts` and `dist` — and run:
 
 ```bash
 node scripts/configure-agent.mjs
 ```
 
-Or have it written into a client's config file for you:
+That prints the config block with your actual install path already filled in, so there is no path to work out. Or have it written for you:
 
 ```bash
-node scripts/configure-agent.mjs --list            # what it can write, and whether each exists
+node scripts/configure-agent.mjs --list                 # known configs, and whether each exists
+node scripts/configure-agent.mjs --write kimi           # Kimi Code
 node scripts/configure-agent.mjs --write claude-desktop
 node scripts/configure-agent.mjs --write cursor
-node scripts/configure-agent.mjs --write project   # .mcp.json in the current folder
+node scripts/configure-agent.mjs --write project        # .mcp.json in the current folder
 ```
 
-It backs the file up first, merges rather than overwrites — other servers and unrelated settings survive — and is safe to re-run.
+**Using an agent that is not listed?** Point it at the config file directly — nearly every client reads the same `mcpServers` key:
+
+```bash
+node scripts/configure-agent.mjs --path "C:/Users/you/.some-agent/mcp.json"
+```
+
+It backs the file up first, merges rather than overwrites — other servers and unrelated settings survive — creates the file if it does not exist yet, and is safe to re-run.
 
 <details>
 <summary>Doing it by hand</summary>
@@ -128,8 +135,11 @@ Every MCP client reads the same shape; they differ only in where it lives.
 |---|---|
 | **Claude Code** | `claude mcp add bg3-agent-bridge -- node C:/path/to/dist/index.js`, or `.mcp.json` in the project root |
 | **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
+| **Kimi Code** | `%USERPROFILE%\.kimi-code\mcp.json` |
 | **Cursor** | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` globally |
 | **Anything else** | Search its docs for `mcpServers` — that key is the common denominator |
+
+Some clients only create their config file after you configure something in the UI, so it may not exist on a fresh install. `--write` creates it.
 
 Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character and will break the file, usually without a useful error.
 
