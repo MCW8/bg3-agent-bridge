@@ -19,6 +19,11 @@
 // not compete.
 //
 // StillAnimationPriority is already "Snared" on both, so it needs no change.
+// FreezeTime is the one that is not obvious from any field name you would think
+// to check. Hold Person sets it to 500, which locks the character half a second
+// after the status lands — so the dance starts, plays briefly, and stops dead.
+// Otto's sets 0. Found by diffing every field of both statuses rather than the
+// handful worth guessing at; a curated list would not have included it.
 new entry "HOLD_PERSON_DANCING"
 type "StatusData"
 data "StatusType" "INCAPACITATED"
@@ -26,6 +31,7 @@ using "HOLD_PERSON"
 data "StillAnimationType" "Dancing"
 data "AnimationLoop" ""
 data "AnimationEnd" ""
+data "FreezeTime" "0"
 data "DisplayName" "hc1562106g41a1g4ddagb857gea20ecca7ef9"
 data "Description" "hb9d22a89gf498g4041gb7f3g85340491b4c0"
 data "Icon" "Spell_OttosIrresistibleDance"
