@@ -4,17 +4,17 @@ An MCP server that gives an AI coding agent a **live feedback loop into a runnin
 
 Editing BG3 mods with an agent today is blind: it writes Lua, you launch the game, you read the error, you paste it back. This closes that loop — the agent can reload scripts, inspect live entities, read stats, and tail the Script Extender log itself.
 
-It is the same shape as Unity MCP, with one substitution that matters: **the Toolkit is not the editor being driven — the running game is.** Larian's Toolkit (`Glasses.exe`) accepts launch arguments and nothing else; it has no plugin API, no headless mode, and no IPC. The Script Extender is where BG3 actually exposes live reflection, so that is what this attaches to.
+Why the Script Extender and not Larian's Toolkit? The Toolkit (`Glasses.exe`) has no plugin API, no headless mode, and no IPC. The Script Extender is where BG3 exposes live reflection.
 
-## What this is not
+**What this is not:**
 
-- **Not a replacement for [BG3 Modders Multitool](https://baldurs-gate-3.thunderstore.io/package/ShinyHobo/BG3_Modders_Multitool/).** Multitool handles unpacking, indexing, and searching game files, and does it well. This is the runtime half, not the static-file half.
-- **Not a Toolkit automation layer.** Nothing here drives the level editor.
-- **Not a way to edit your mod source.** Everything it changes is session-only. Your agent already has file tools for the source.
+- Not a replacement for [BG3 Modders Multitool](https://baldurs-gate-3.thunderstore.io/package/ShinyHobo/BG3_Modders_Multitool/), which unpacks, indexes, and searches game files. This is the runtime half, not the static-file half.
+- Not a Toolkit automation layer.
+- Not a source editor. Everything it changes is session-only; your agent already has file tools for the source.
 
 ## How it works
 
-The Script Extender explicitly has **no networking** — SE mods cannot open sockets or talk to external processes. It does have `Ext.IO.SaveFile` / `Ext.IO.LoadFile` and a per-tick event, so the transport is a file mailbox in the Script Extender data directory:
+The Script Extender has **no networking** — SE mods cannot open sockets. It does have `Ext.IO.SaveFile` / `Ext.IO.LoadFile` and a per-tick event, so the transport is a file mailbox in the Script Extender data directory:
 
 ```
 MCP server (Node)                       Companion mod (Lua, in-game)
@@ -25,19 +25,19 @@ MCP server (Node)                       Companion mod (Lua, in-game)
        |               {seq, ok, result|error}       |
 ```
 
-Writes are atomic (temp file plus rename) so neither side reads a half-written message, and a sequence cursor keeps a completed request from being replayed after a VM reset. `server` and `client` contexts get separate mailboxes.
+Writes are atomic (temp file plus rename), and a sequence cursor prevents replay after a VM reset. `server` and `client` contexts get separate mailboxes.
 
 ## Read this before installing
 
 **This is a development tool, and it executes arbitrary Lua inside your game.**
 
-That is the whole point — `bg3_eval` runs whatever it is given in the live session, which is what makes the rest possible. But it means:
+That is the whole point — `bg3_eval` runs whatever it is given in the live session. But it means:
 
-- The bridge reads commands from a **plain file in your Script Extender folder**. Anything running on your machine that can write there can run Lua in your game. There is no authentication, because a file mailbox cannot have any.
+- The bridge reads commands from a **plain file in your Script Extender folder** — anything that can write there can run Lua in your game. There is no authentication; a file mailbox cannot have any.
 - Lua under the Script Extender can read and write files, so this is not sandboxed to the game.
-- Whatever agent you connect can do all of it without asking you first.
+- Whatever agent you connect can do all of this without asking first.
 
-None of that is a problem while you are actively modding, which is the only situation it is built for. It is a bad thing to leave installed and forgotten.
+Fine while you are actively modding — the only situation it is built for. Bad to leave installed and forgotten.
 
 **Uninstall it when you are done:**
 
@@ -45,40 +45,24 @@ None of that is a problem while you are actively modding, which is the only situ
 node scripts/install-dev.mjs --uninstall
 ```
 
-Then remove the server from your agent's MCP config. `bg3_bridge_status` will tell you whether it is currently live.
-
-Treat it the way you would treat a debug console you deliberately switched on: useful, powerful, and not something to leave running in the background.
+Then remove the server from your agent's MCP config. `bg3_bridge_status` reports whether it is still live.
 
 ## Requirements
 
-- Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**
-
-  The Script Extender updates itself by default, so a current install already qualifies. If yours is older the mod will not load at all — that is the extender's own behaviour for `RequiredVersion`, not something this can work around gracefully.
-- **[Node.js](https://nodejs.org/) 20 or newer** — the server is a Node program, so this is the one hard prerequisite.
-
-  Open PowerShell and run:
+- Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**. SE updates itself by default; older versions simply refuse to load the mod (`RequiredVersion`).
+- **[Node.js](https://nodejs.org/) 20 or newer** — the one hard prerequisite:
 
   ```bash
   winget install OpenJS.NodeJS.LTS
   ```
 
-  `winget` ships with Windows 10 and 11. If it is missing, download the **LTS** installer from [nodejs.org](https://nodejs.org/) and click through it — the defaults are correct.
-
-  **Then close that window and open a new one.** Installers only update `PATH` for terminals opened afterwards, so an existing window will keep insisting `node` is not recognised. Check in the new window:
-
-  ```bash
-  node --version
-  ```
-
-  Anything `v20` or higher is fine.
+  `winget` ships with Windows 10 and 11; if it is missing, use the **LTS** installer from [nodejs.org](https://nodejs.org/). **Then open a new terminal** — installers only update `PATH` for windows opened afterwards. Verify with `node --version`; anything `v20+` is fine.
 
 You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Those are only for building your own `.pak` later.
 
 ## Install
 
-**1. Get the files**
-
-Download `bg3-agent-bridge-v0.1.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere — your Documents folder is fine. It ships already built, so there is nothing to compile.
+**1. Get the files.** Download `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. It ships already built.
 
 <details>
 <summary>From source instead (needs git and npm)</summary>
@@ -91,38 +75,25 @@ npm install && npm run build
 
 </details>
 
-**2. Install the mod, with the game closed**
+**2. Install the mod, with the game closed:**
 
 ```bash
 node scripts/install-dev.mjs
 ```
 
-That finds your BG3 install, copies the companion mod into `Data\Mods\` as loose files, and adds it to `modsettings.lsx` — backing that file up first, and refusing to run while the game is open, because the game rewrites it from memory on exit.
+Finds your BG3 install, copies the companion mod into `Data\Mods\` as loose files, and adds it to `modsettings.lsx` (backed up first; refuses to run while the game is open, because the game rewrites that file from memory on exit). `BG3_GAME_DIR` overrides the install search; `--uninstall` reverses it.
 
-No mod manager and no packing. Loose is the right mode for modding anyway: **a packed mod's Lua cannot be hot-reloaded**, since the pak is read once at startup, so `bg3_reload` would just re-read the same bytes. Loose files mean your edits apply on the next reload.
+Loose files rather than a packed `.pak`, deliberately: a pak is read once at startup, so **packed Lua cannot be hot-reloaded**. Loose files apply on the next `bg3_reload`.
 
-`node scripts/install-dev.mjs --uninstall` reverses it. Set `BG3_GAME_DIR` if your install is somewhere unusual.
+**3. Connect your agent:**
 
-**3. Ask your agent to connect itself**
-
-That script finishes by printing a config block with your real install path already in it, like this:
-
-```json
-{
-  "mcpServers": {
-    "bg3-agent-bridge": {
-      "command": "node",
-      "args": ["C:/Users/you/bg3-agent-bridge/dist/index.js"]
-    }
-  }
-}
+```bash
+node scripts/configure-agent.mjs
 ```
 
-**Copy it, paste it into a chat with your AI agent, and ask it to add this to its MCP config.** Most agents know where their own config lives, will create the file if it does not exist, and will validate the JSON afterwards. Then restart the agent.
+Prints an MCP config block with your real install path already in it. **Paste it into a chat with your AI agent and ask it to add the server to its MCP config**, then restart the agent. If yours cannot edit its own config, see [Connecting your AI agent](#connecting-your-ai-agent).
 
-That is genuinely the whole step — it is how this was first connected to Kimi Code, in one message. See [Connecting your AI agent](#connecting-your-ai-agent) if yours cannot edit its own config.
-
-**4. Verify** — launch the game, load a save, and ask your agent to call `bg3_bridge_status`. Or, with no agent involved at all:
+**4. Verify.** Launch the game, load a save, and ask your agent to call `bg3_bridge_status`. Or, with no agent involved:
 
 ```bash
 node scripts/check-bridge.mjs
@@ -132,20 +103,7 @@ That last one is the best first diagnostic: it talks to the game directly, so it
 
 ## Connecting your AI agent
 
-**Simplest route: let the agent do it.** Open a terminal in the folder you extracted — the one containing `scripts` and `dist` — and run:
-
-```bash
-node scripts/configure-agent.mjs
-```
-
-That prints a config block with your actual install path already in it. Paste that into a chat with your agent and ask it to add the server to its own MCP config. Most agents know where their config lives, will create it if missing, and will validate it — that is how this was first set up under Kimi Code, and it took one message.
-
-Then restart the agent.
-
-<details>
-<summary>Or have the script write it directly</summary>
-
-Useful if your agent cannot edit its own config:
+If the agent cannot edit its own config, the script can write it directly:
 
 ```bash
 node scripts/configure-agent.mjs --list                 # known configs, and whether each exists
@@ -153,17 +111,10 @@ node scripts/configure-agent.mjs --write kimi           # Kimi Code
 node scripts/configure-agent.mjs --write claude-desktop
 node scripts/configure-agent.mjs --write cursor
 node scripts/configure-agent.mjs --write project        # .mcp.json in the current folder
+node scripts/configure-agent.mjs --path "C:/Users/you/.some-agent/mcp.json"   # anything else
 ```
 
-**Using an agent that is not listed?** Point it at the config file directly — nearly every client reads the same `mcpServers` key:
-
-```bash
-node scripts/configure-agent.mjs --path "C:/Users/you/.some-agent/mcp.json"
-```
-
-It backs the file up first, merges rather than overwrites — other servers and unrelated settings survive — creates the file if it does not exist yet, and is safe to re-run.
-
-</details>
+It backs the file up first, merges rather than overwrites, creates the file if missing, and is safe to re-run.
 
 <details>
 <summary>Doing it by hand</summary>
@@ -189,26 +140,26 @@ Every MCP client reads the same shape; they differ only in where it lives.
 | **Cursor** | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` globally |
 | **Anything else** | Search its docs for `mcpServers` — that key is the common denominator |
 
-Some clients only create their config file after you configure something in the UI, so it may not exist on a fresh install. `--write` creates it.
+Some clients only create their config after you configure something in the UI, so it may not exist on a fresh install — `--write` creates it.
 
 Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character and will break the file, usually without a useful error.
 
 </details>
 
-**Confirm it registered** before blaming the bridge — most clients list connected servers somewhere in their UI. You want `bg3-agent-bridge` with 14 tools named `bg3_*`. If they are absent, the problem is the config, not the game. **Restart the client after editing config**; almost none reload it live.
+**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 18 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
 
 ## Building your own mods
 
-Only relevant once you are making mods rather than just running this. You need `divine.exe`, the LSLib CLI:
+Only relevant once you are making mods rather than just running this. Packing needs `divine.exe`, the LSLib CLI:
 
 1. Download `ExportTool-vX.Y.Z.zip` from [LSLib releases](https://github.com/Norbyte/lslib/releases) and extract it anywhere
 2. `set BG3_DIVINE_PATH=C:\path\to\Tools\divine.exe`
 
-[BG3 Modders Multitool](https://github.com/ShinyHobo/BG3-Modders-Multitool) bundles divine, so point `BG3_DIVINE_PATH` at its `Tools` folder if you already use it. `npm run install-mod` searches `PATH` and the usual extract locations, and lists everywhere it looked if it comes up empty.
+[BG3 Modders Multitool](https://github.com/ShinyHobo/BG3-Modders-Multitool) bundles divine — point `BG3_DIVINE_PATH` at its `Tools` folder if you use it. `npm run install-mod` packs the companion mod, searching `PATH` and the usual extract locations.
 
-It is not vendored here deliberately: LSLib tracks game patches, so a bundled copy would go stale exactly when a new patch lands, and shipping someone else's binary would put its integrity on this repo rather than upstream.
+Not vendored, deliberately: LSLib tracks game patches, so a bundled copy goes stale exactly when a patch lands, and shipping someone else's binary puts its integrity on this repo rather than upstream.
 
-The `examples/` directory has two worked mods — a spell and an item — each with build commands and the mistakes worth avoiding.
+The `examples/` directory has three worked mods — a spell, an item, and a status composition — each with build commands and the mistakes worth avoiding.
 
 ## Tools
 
@@ -237,7 +188,7 @@ Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_DIVINE_
 
 ## Finding asset GUIDs
 
-`bg3_find_resource` searches the loaded resource banks directly, so you can go from a half-remembered name to a GUID without unpacking anything. Every string field is searchable, including `SourceFile`, so searching by `.bnk` or pak name works too.
+`bg3_find_resource` searches the loaded resource banks directly — half-remembered name to GUID, no unpacking. Every string field is searchable, including `SourceFile`, so searching by `.bnk` or pak name works too.
 
 ```
 bg3_find_resource type=Sound  query=thunderwave
@@ -248,11 +199,11 @@ bg3_find_resource type=Visual query=barbarian
   slot=Footwear  GTY_M_ARM_BarbarianMagical_A_Footwear  25587081-9fd5-64dc-fdec-760a0dab50e5
 ```
 
-Sounds carry a readable `SoundEvent`; visuals carry `Slot`, `Template` and `SkeletonResource`; `moddedOnly` narrows to what a mod added. Scans are whole-bank — roughly 160ms across 24k sounds and 740ms across 60k visuals, which is a brief but real hitch in the running game, so prefer a narrow `query`.
+Sounds carry a readable `SoundEvent`; visuals carry `Slot`, `Template`, `SkeletonResource`; `moddedOnly` narrows to modded entries. Scans are whole-bank (~160ms over 24k sounds, ~740ms over 60k visuals — a brief but real hitch in the running game), so prefer a narrow `query`.
 
 ### Capturing engine sound requests (limited)
 
-`Ext.Audio` is write-only, but the engine's `SoundRoutingSystem` exposes a queue of `SoundPostEventRequest`s, and that queue is readable from a tick handler. `bg3_capture_sounds` drains it every tick:
+`Ext.Audio` is write-only, but the engine's `SoundRoutingSystem` exposes a queue of `SoundPostEventRequest`s, readable from a tick handler. `bg3_capture_sounds` drains it every tick:
 
 ```
 bg3_capture_sounds action=start        arm it
@@ -260,15 +211,11 @@ bg3_capture_sounds action=start        arm it
 bg3_capture_sounds action=read         what was queued, with repeat counts
 ```
 
-Entries carry the event name, subject entity, and type. Repeats on consecutive frames collapse into a `count`, and overflow is counted rather than dropped.
-
-**Set your expectations low: this is not a general "what sound was that?" tool.** Testing against jumping and against repeated spell casts produced `Shake_Rumble_Start`/`_Stop` and nothing else — the rumble and screen-shake channel. The audio you actually hear, including the cast and impact sounds of a spell that visibly triggered these entries, never appeared in the queue. Most of BG3's audio evidently reaches Wwise by a path that does not pass through this system.
-
-What it is genuinely good for is detecting **impact and shake moments** — landings, AOE impacts — with a per-event subject entity, which is a reliable hook even though it tells you nothing about the audio. Whether any other category of sound ever appears here is unproven; two tests both returned rumble only.
+**Set your expectations low.** Testing against jumping and repeated spell casts produced `Shake_Rumble_Start`/`_Stop` and nothing else — the rumble and screen-shake channel; the audio you actually hear never appeared. What it is good for is detecting **impact and shake moments** with a per-event subject entity — a reliable hook that tells you nothing about the audio.
 
 ### Auditioning a sound
 
-The search-then-play loop still matters for sounds you have a name for rather than an action to perform:
+For sounds you have a name for:
 
 ```
 bg3_find_resource type=Sound query=thunderwave     -> SoundEvent name
@@ -277,21 +224,19 @@ bg3_play_sound    event=... target=<character UUID>   -- positional, at that cha
 bg3_play_sound    target=Global stop=true             -- if a looping event will not end
 ```
 
-`target` takes a built-in sound object — `Global`, `Music`, `Ambient`, `HUD`, `Listener` — or an entity UUID to play positionally. Those names were found by probing, since the engine rejects unknown ones and exposes no enum to list them; other plausible names (`UI`, `Camera`, `Player`, `World`) are not valid. A misspelled event returns `posted: false` rather than raising, which is how you tell "Wwise does not know this event" from "the call failed".
+`target` takes a built-in sound object — `Global`, `Music`, `Ambient`, `HUD`, `Listener` — or an entity UUID. (Found by probing; plausible names like `UI` or `Player` are not valid.) A misspelled event returns `posted: false` rather than raising.
 
-**`posted: true` does not mean you heard anything.** Most game sounds are positional: fire one at a built-in object and it plays nowhere near the listener, returning success in silence. Prefer `target=<character UUID>`. When a built-in target is used the tool looks the event up and warns if its `MaxDistance` is short — `Action_Cast_Jump` at 50 is inaudible on `Global`, while the forge hammer at 120 carries fine.
-
-Foley events add a second failure mode: many are gated on Wwise **switches** such as surface material or character size, and fired cold they resolve to little or nothing. A valid event that plays as a faint click is usually this rather than a wrong GUID. `Ext.Audio.SetSwitch` is the lever, and is not yet wrapped as a tool.
+**`posted: true` does not mean you heard anything.** Most game sounds are positional: fired at a built-in object they play nowhere near the listener. Prefer `target=<character UUID>`; with a built-in target the tool warns if the event's `MaxDistance` is short. Many foley events are also gated on Wwise **switches** (surface material, character size) and fired cold resolve to a faint click or nothing — `Ext.Audio.SetSwitch` is the lever, not yet wrapped as a tool.
 
 ### What this means for audio mods
 
-Sounds attached to a spell are exposed as stat fields and are straightforward to swap — `Projectile_Jump` carries `CastSound`, `PrepareSound` and `PrepareLoopSound`, so overriding one is a stat edit. Movement foley is not: `MOVEMENT.bnk` has 36 events and none of them is a landing, and no `ImpactSound` field exists on the jump spell. Layering a sound on top from Lua is easy; genuinely *replacing* engine-driven foley means rebuilding a soundbank, which is outside what this does.
+Sounds attached to a spell are stat fields and easy to swap — `Projectile_Jump` carries `CastSound`, `PrepareSound`, `PrepareLoopSound`. Movement foley is not: `MOVEMENT.bnk` has 36 events, none a landing, and the jump spell has no `ImpactSound` field. Layering a sound on top from Lua is easy; *replacing* engine-driven foley means rebuilding a soundbank — outside what this does.
 
-**`bg3_play_sound` is a development tool, not a player-facing feature.** It fires when the tool is called from outside the game; nothing is bound to input and the person playing gets no control from it. Letting a player trigger sounds at will is a mod — the same `Ext.Audio.PostEvent` call, bound to a spell, item or console command.
+**`bg3_play_sound` is a development tool, not a player-facing feature.** Nothing is bound to input. Letting a player trigger sounds is a mod — the same `Ext.Audio.PostEvent` call, bound to a spell, item or console command.
 
 ## Finding things by the name you remember
 
-Asset names are not the names players use. `bg3_find_template` therefore ignores spaces, underscores and case, and falls back to typo-tolerant matching when nothing matches literally:
+Asset names are not the names players use. `bg3_find_template` ignores spaces, underscores and case, and falls back to typo-tolerant matching when nothing matches literally:
 
 ```
 "Blood of Lathander"   1 match, exact       UNI_CRE_HUM_Sun_Mace_BloodOfLathander
@@ -300,13 +245,11 @@ Asset names are not the names players use. `bg3_find_template` therefore ignores
 "Grateaxe"            16 matches, fuzzy     every greataxe, distance 2
 ```
 
-The fuzzy pass only runs when the literal one finds nothing, so the usual case stays at ~110ms and typos cost ~350ms. Every word of the query has to match something, which is what ranks sensibly: `"blood lathandar"` puts the mace above a Lathander portrait, because nothing in the portrait resembles "blood". A single vague word cannot do that — `"Lathandar"` alone returns 44 hits in arbitrary order.
+The fuzzy pass only runs when the literal one finds nothing (~110ms usual, ~350ms with typos). Every query word must match something, which is what ranks sensibly: `"blood lathandar"` puts the mace above a Lathander portrait, because nothing in the portrait resembles "blood". `"Lathandar"` alone returns 44 hits in arbitrary order. Results carry the resolved `DisplayName`, usually the only way to tell one of 173 hits from another.
 
-Results carry the resolved `DisplayName`, which is usually the only practical way to tell `UNI_CRE_HUM_Sun_Mace_BloodOfLathander` from 173 other hits.
+**Searches match display names as well as internal ones, by default.** The status players see as *Marked for Negation* is internally `OBLITERATIONORB` — the two share not one word, so no name search reaches it otherwise. Resolving display names across all 32k templates costs ~31ms, not worth optimising away.
 
-**Searches match display names as well as internal ones, by default.** This matters more than it sounds. The status shown to players as *Marked for Negation* is internally `OBLITERATIONORB` — the two share not one word, so no name search of any kind reaches it. The same was true of a ghostly effect that turned out to be `LOW_OSKARSBELOVED_POSSESSING_FX`. Resolving display names across all 32k templates costs about 31ms, which is not worth optimising away.
-
-`bg3_find_stat` is the one to reach for when you remember what something is called in game:
+`bg3_find_stat` is the one to reach for when you remember the in-game name — it also resolves the visual effect, so finding a status and learning what it looks like is one call:
 
 ```
 bg3_find_stat type=StatusData query="Marked for Negation"
@@ -314,11 +257,9 @@ bg3_find_stat type=StatusData query="Marked for Negation"
   StatusEffectName: END_ORB_OF_OBLITERATION_PLATFORM_WARNING_StatusEffect
 ```
 
-It resolves the visual effect name too, so finding a status and learning what it looks like is one call rather than three.
-
 ## Finding a visual effect you have seen but cannot name
 
-Effects are the hardest thing to search for, because a status is almost never named after how it looks. Working backwards from the effect is what gets there. A real example — finding the green spectral look from Oskar's Beloved:
+A status is almost never named after how it looks, so work backwards from the effect. A real example — the green spectral look from Oskar's Beloved:
 
 ```
 bg3_find_static_data type=MultiEffectInfo query=possess
@@ -332,11 +273,11 @@ bg3_preview_status action=apply status=LOW_OSKARSBELOVED_POSSESSING_FX
 bg3_preview_status action=clear
 ```
 
-**Nothing in `LOW_OSKARSBELOVED_POSSESSING_FX` says "green", "ghost" or "spectral".** No amount of name searching finds it from what it looks like. The route in is `MultiEffectInfo` → status → wear it, and the last step matters most: candidates are cheap to try, so guessing badly costs seconds.
+**Nothing in `LOW_OSKARSBELOVED_POSSESSING_FX` says "green", "ghost" or "spectral".** The route in is `MultiEffectInfo` → status → wear it. The last step matters most: candidates are cheap to try, so guessing badly costs seconds.
 
-Which terms you try is the skill. Searching "ghost" finds `GHOST_FX` — a different, bluer effect. Searching "possess" finds this one. Search the *situation* the effect belongs to (a quest name, a creature, a condition) as well as the appearance, since that is how Larian names things.
+Which terms you try is the skill: "ghost" finds `GHOST_FX`, a different, bluer effect. Search the *situation* the effect belongs to (quest, creature, condition) as well as the appearance — that is how Larian names things.
 
-`bg3_find_static_data` covers roughly 130 types beyond effects: `VFX`, `Flag`, `Tag`, `Race`, `Progression`, `SpellList`, `ClassDescription`, `Feat`. An invalid type name returns the full list.
+`bg3_find_static_data` covers ~130 types beyond effects: `VFX`, `Flag`, `Tag`, `Race`, `Progression`, `SpellList`, `ClassDescription`, `Feat`. An invalid type name returns the full list.
 
 Check `statusType` before applying. `EFFECT` is purely cosmetic; `BOOST` changes gameplay and `POLYMORPHED` replaces the model.
 
@@ -352,13 +293,11 @@ bg3_preview_item action=apply template=b4c754d8-...   wear it
 bg3_preview_item action=restore                        put the original back
 ```
 
-**There is no in-place visual swap in BG3.** Writing an equipped item's `GameObjectVisual` changes the value and nothing renders differently; `Osi.AddCustomVisualOverride` exists and can be called, but has no visible effect on equipment. Shipped transmog mods work by *equipping a different item* — spawning the good-looking one, copying the original's stats onto it, and wearing that.
+**There is no in-place visual swap in BG3.** Writing an equipped item's `GameObjectVisual` changes the value and nothing renders differently; `Osi.AddCustomVisualOverride` exists but has no visible effect on equipment. Shipped transmog mods *equip a different item* — spawn the good-looking one, copy the original's stats onto it, wear that. (The counterpart is spelled `Osi.RemoveCustomVisualOvirride` — Larian's typo, and the misspelled name is the one bound at runtime.)
 
-Its counterpart is spelled `Osi.RemoveCustomVisualOvirride` — Larian's typo, not a documentation error, and the misspelled name is the one bound at runtime.
+`bg3_preview_item` does the light version: spawns the template with `temporary=1`, equips it, moves the original to inventory, restores on request. The preview is a **real item with its own stats** — previewing plate over leather genuinely changes armour class, so not mid-combat — and an un-restored preview leaves the original in inventory.
 
-`bg3_preview_item` does the light version of the same thing, since a preview does not have to stay playable. It spawns the template with `temporary=1`, equips it, moves the original to inventory, and restores on request. Two consequences worth knowing: the preview is a **real item with its own stats**, so previewing plate over leather genuinely changes armour class — don't do it mid-combat — and an un-restored preview leaves the original sitting in inventory.
-
-Slot detection reads the item's `Equipable.Slot`, which reports `Breast`. `Osi.GetEquipmentSlotForItem` returns an enum index (`1`) that `GetEquippedItem` will not accept.
+Slot detection reads `Equipable.Slot`, which reports `Breast`; `Osi.GetEquipmentSlotForItem` returns an enum index (`1`) that `GetEquippedItem` will not accept.
 
 ## A note on RequiredVersion
 
@@ -366,29 +305,27 @@ Slot detection reads the item's `Equipable.Slot`, which reports `Breast`. `Osi.G
 
 > use the version number of the Script Extender you used for developing the mod **since the behavior of new features and backwards compatibility functions depends on this version number**
 
-So a low number is not the cautious choice it looks like — it asks the extender to run your mod under old-version compatibility behaviour. This started life at `7`, copied from a working mod without checking, which meant a v32 runtime was applying v7 semantics to everything here.
-
-The extender's API version tracks its release number; the installed build reports it as the file version of `BG3ScriptExtender.dll` in `%LOCALAPPDATA%\BG3ScriptExtender\`. Set it to whatever you actually developed and tested against.
+A low number is not the cautious choice it looks like — it asks the extender to run your mod under old-version compatibility behaviour. This started life at `7`, copied from a working mod without checking, so a v32 runtime was applying v7 semantics to everything here. The installed build reports its API version as the file version of `BG3ScriptExtender.dll` in `%LOCALAPPDATA%\BG3ScriptExtender\`; set `RequiredVersion` to what you actually developed and tested against.
 
 ## On the reference dumps
 
 Measured against SE v32, not assumed:
 
-- **Existence data is trustworthy.** `pairs(Osi)` enumerates 1303 names; `Osi.lua` declares 983 and `Osi.Events.lua` 320, summing exactly, with nothing declared-but-absent and nothing runtime-but-undocumented. Those files were 16 months old and still correct.
-- **Signatures are not.** `Ext.Vars.RegisterUserVariable` is declared as taking a name alone; calling it that way fails, because the options table is required. Regenerating does not help — `Ext.Types.GenerateIdeHelpers` produces the same wrong signature, since the generator cannot express optional parameters. Only calling a function settles its shape, which `bg3_eval` makes cheap.
+- **Existence data is trustworthy.** `pairs(Osi)` enumerates 1303 names; `Osi.lua` declares 983 and `Osi.Events.lua` 320, summing exactly, nothing declared-but-absent or runtime-but-undocumented — in files 16 months old.
+- **Signatures are not.** `Ext.Vars.RegisterUserVariable` is declared as taking a name alone; calling it that way fails — the options table is required. Regenerating does not help: the generator cannot express optional parameters. Only calling a function settles its shape, which `bg3_eval` makes cheap.
 - **`Ext.Osiris.RegisterListener` is missing** from generated helpers entirely, so LaughingLeader's separate file for it stays necessary.
 
-`Ext.Types.GenerateIdeHelpers("Helpers.lua")` still earns its place for *coverage* — it writes a build-exact file to the Script Extender directory, roughly 950 lines larger than a three-month-old copy.
+`GenerateIdeHelpers("Helpers.lua")` still earns its place for *coverage*: a build-exact file, roughly 950 lines larger than a three-month-old copy.
 
-Checking whether an `Osi` function exists needs `type(Osi.X) ~= "nil"`. Entries are userdata (`OsiFunction(name)`), never Lua functions, so `type(Osi.X) == "function"` is false for every one of them — a check that will convince you a working function is missing.
+Checking whether an `Osi` function exists needs `type(Osi.X) ~= "nil"` — entries are userdata, never Lua functions, so `type(Osi.X) == "function"` is false for every one of them: a check that will convince you a working function is missing.
 
 ## Known limits
 
-**`bg3_eval` depends on a capability that is not guaranteed.** `load()` is not *documented* as exposed to mod scripts, though it was present on the build this was developed against. The mod probes at boot and reports through `bg3_bridge_status`, so if it is missing you get a clear message rather than a silent failure. Note that Script Extender's `load` takes an environment table as its second argument, not standard Lua's chunk-name string. The structured tools do not depend on any of this.
+**`bg3_eval` depends on a capability that is not guaranteed.** `load()` is not *documented* as exposed to mod scripts. The mod probes at boot and reports through `bg3_bridge_status`, so a missing `load` is a clear message, not a silent failure. SE's `load` takes an environment table as its second argument, not a chunk-name string. The structured tools do not depend on any of this.
 
-**Some objects cannot be serialized at all.** Large stat entries — spells especially — follow an inheritance chain deep enough to exceed the JSON serializer's recursion limit, and that limit *raises* rather than truncating, so a lower `depth` turns a large result into a hard error instead of a smaller one. `bg3_stats_get` on `Projectile_MagicMissile` fails this way; reading a single `attribute` from the same entry returns instantly. Prefer `attribute` and `component` over whole-object dumps.
+**Some objects cannot be serialized.** Large stat entries follow an inheritance chain deep enough to exceed the JSON recursion limit, and that limit *raises* rather than truncating — a lower `depth` turns a large result into a hard error. `bg3_stats_get` on `Projectile_MagicMissile` fails this way; a single `attribute` from the same entry returns instantly. Prefer `attribute` and `component` over whole-object dumps.
 
-**Round trips cost about a second.** The mod polls every 30 ticks. One poll costs Script Extender 7-9ms, enough that it is flagged as a slow event, so polling faster trades frame time for latency that agent workflows do not need.
+**Round trips cost about a second.** The mod polls every 30 ticks; one poll already costs SE 7-9ms, flagged as a slow event. Polling faster trades frame time for latency agents do not need.
 
 **Three tiers of change, only one of which is fast.**
 
@@ -398,22 +335,22 @@ Checking whether an `Osi` function exists needs `type(Osi.X) ~= "nil"`. Entries 
 | Packed data (stats, root templates, localization) | Repack and restart the game |
 | Load order (`modsettings.lsx`, adding a pak) | Restart the game — **and** see the hazard below |
 
-Reloading a *save* applies none of these; it re-reads the save, not the module list. Worse, the game rewrites `modsettings.lsx` on exit from its in-memory load order, so an entry added while the game was running can be silently discarded when you quit. Edit that file with the game closed, and use `bg3_list_mods` to confirm what actually mounted.
+Reloading a *save* applies none of these — it re-reads the save, not the module list. Worse, the game rewrites `modsettings.lsx` on exit from its in-memory load order, silently discarding entries added while it was running. Edit that file with the game closed, and confirm what mounted with `bg3_list_mods`.
 
-**Hot reload only covers Lua, and it is not per-context.** `bg3_reload` reinitialises the Lua VM, so edited scripts take effect immediately. Changes to packed data — stats, root templates, localization — still need a repack and a restart. `Ext.Debug.Reset()` restarts **both** the server and client VMs no matter which context asks, so all in-memory Lua state goes with it, including runtime edits made through `bg3_stats_set`. The `context` argument picks the transport, not the scope.
+**Hot reload is not per-context.** `Ext.Debug.Reset()` restarts **both** server and client VMs whichever context asks — all in-memory Lua state goes with it, including `bg3_stats_set` edits. The `context` argument picks the transport, not the scope.
 
-**`bg3_eval` does not run inside your mod's sandbox.** Chunks compile into the default global table, so `Ext`, `Osi`, and `Mods` are all reachable but a mod's own bare globals are not. Reach mod state through `Mods.<ModTable>` instead.
+**`bg3_eval` does not run inside your mod's sandbox.** Chunks compile into the default global table: `Ext`, `Osi`, `Mods` are reachable, your mod's bare globals are not. Reach mod state through `Mods.<ModTable>`.
 
-**The loop is slower than Unity's.** The game takes about a minute to boot and needs a loaded save. Keep one instance alive and iterate against it rather than restarting per change. The `client` context only answers once a save is loaded; `server` is the right default for almost everything.
+**The loop is slower than Unity's.** The game boots in about a minute and needs a loaded save — keep one instance alive and iterate against it. `client` only answers once a save is loaded; `server` is the right default for almost everything.
 
 **Script Extender's API moves with game patches.** Every capability is probed at runtime rather than assumed, but a large enough patch will still need updates here.
 
 ## Legal
 
-This ships no Larian assets and no Toolkit code. Larian's [modding terms](https://baldursgate3.game/modding-terms/) grant a non-transferable licence to *use* the Toolkit and forbid redistributing it, so the companion mod is built from source on your machine against your own install. LSLib is MIT licensed. Do not commit extracted game data — `.gitignore` covers the obvious paths.
+Ships no Larian assets and no Toolkit code. Larian's [modding terms](https://baldursgate3.game/modding-terms/) forbid redistributing the Toolkit, so the companion mod is built from source on your machine against your own install. LSLib is MIT licensed. Do not commit extracted game data — `.gitignore` covers the obvious paths.
 
 ## Contributing
 
-Adding an operation means two small edits: a handler in `mod/Mods/BG3AgentBridge/ScriptExtender/Lua/Bridge/Handlers.lua`, and a `defineTool` call in `src/index.ts`. The mailbox handles framing, ordering, errors, and timeouts.
+Adding an operation is two small edits: a handler in `mod/Mods/BG3AgentBridge/ScriptExtender/Lua/Bridge/Handlers.lua`, and a `defineTool` call in `src/index.ts`. The mailbox handles framing, ordering, errors, and timeouts.
 
 MIT licensed.
