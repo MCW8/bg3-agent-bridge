@@ -349,6 +349,6 @@ Ships no Larian assets and no Toolkit code. Larian's [modding terms](https://bal
 
 Adding an operation is two small edits: a handler in `mod/Mods/BG3AgentBridge/ScriptExtender/Lua/Bridge/Handlers.lua`, and a `defineTool` call in `src/index.ts`. The mailbox handles framing, ordering, errors, and timeouts.
 
-CLI commands live in `src/cli/`, shared by the Node wrappers in `scripts/` and the compiled exe (`src/cli/main.ts` dispatches). `npm run build:exe` rebuilds `dist/bg3-bridge.exe`; it needs `tools/bun.exe` from [Bun releases](https://github.com/oven-sh/bun/releases), which is gitignored and build-time-only.
+CLI commands live in `src/cli/`, shared by the Node wrappers in `scripts/` and the compiled exe (`src/cli/main.ts` dispatches). `npm run build:exe` rebuilds `dist/bg3-bridge.exe`; it needs `tools/bun.exe` from [Bun releases](https://github.com/oven-sh/bun/releases), which is gitignored and build-time-only. `npm run release` builds the exe and assembles `dist/bg3-agent-bridge-vX.Y.Z.zip` (exe + `mod/` + README + LICENSE), ready to attach to a GitHub release.
 
 MIT licensed.

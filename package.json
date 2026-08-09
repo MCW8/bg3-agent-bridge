@@ -27,6 +27,7 @@
   "scripts": {
     "build": "tsc",
     "build:exe": "node scripts/build-exe.mjs",
+    "release": "node scripts/pack-release.mjs",
     "watch": "tsc --watch",
     "typecheck": "tsc --noEmit",
     "start": "node dist/index.js",
