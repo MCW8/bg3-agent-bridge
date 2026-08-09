@@ -9,6 +9,9 @@ tools/
 # Machine-local Claude Code state
 .claude/settings.local.json
 
+# Machine-local MCP config — the server path is specific to each install
+.mcp.json
+
 # Never commit extracted game data or built packages — Larian's Toolkit EULA
 # forbids redistributing Toolkit output and game assets.
 *.pak

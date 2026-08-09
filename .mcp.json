@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "bg3-agent-bridge": {
-      "command": "node",
-      "args": ["dist/index.js"]
-    }
-  }
-}
