@@ -17,7 +17,7 @@
  *
  * Usage:  npm run release
  */
-import { cpSync, copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { cpSync, copyFileSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -47,10 +47,11 @@ cpSync(path.join(root, 'mod'), path.join(staging, 'mod'), { recursive: true });
 copyFileSync(path.join(root, 'README.md'), path.join(staging, 'README.md'));
 copyFileSync(path.join(root, 'LICENSE'), path.join(staging, 'LICENSE'));
 
-// 3. Zip it. Zip targets live directly in dist/, next to the exe.
+// 3. Zip it. Zip targets live directly in dist/, next to the exe. Entries are
+// passed by name rather than as "." so members do not carry a ./ prefix.
 const zip = path.join(root, 'dist', `bg3-agent-bridge-v${version}.zip`);
 rmSync(zip, { force: true });
-run('tar', ['-a', '-c', '-f', zip, '-C', staging, '.']);
+run('tar', ['-a', '-c', '-f', zip, '-C', staging, ...readdirSync(staging)]);
 
 if (!existsSync(zip)) {
     console.error(`\n  tar reported success but ${zip} is missing.\n`);
