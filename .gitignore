@@ -3,6 +3,9 @@ dist/
 *.tsbuildinfo
 *.log
 
+# Build-time-only tools (bun.exe for the exe build) — downloaded, never committed
+tools/
+
 # Machine-local Claude Code state
 .claude/settings.local.json
 

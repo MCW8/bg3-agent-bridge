@@ -10,6 +10,7 @@ import * as z from 'zod';
 import { callBridge, readHello, type BridgeContext } from './mailbox.js';
 import { listLogFiles, tailLog } from './logs.js';
 import { bridgeDir, logDirectories } from './paths.js';
+import { ranDirectly } from './runtime.js';
 
 /**
  * Read from package.json rather than hardcoded: a duplicated constant silently
@@ -29,7 +30,11 @@ function readVersion(): string {
     }
 }
 
-const VERSION = readVersion();
+// Baked in by scripts/build-exe.mjs via bun --define; undeclared at runtime
+// under plain Node, where the package.json read below answers instead.
+declare const BG3_BUILD_VERSION: string | undefined;
+
+const VERSION = typeof BG3_BUILD_VERSION !== 'undefined' ? BG3_BUILD_VERSION : readVersion();
 
 const contextSchema = z
     .enum(['server', 'client'])
@@ -620,8 +625,12 @@ function registerTools(server: McpServer): void {
     );
 }
 
-serveStdio(() => {
-    const server = new McpServer({ name: 'bg3-agent-bridge', version: VERSION }, { capabilities: { tools: {} } });
-    registerTools(server);
-    return server;
-});
+export function serve(): void {
+    serveStdio(() => {
+        const server = new McpServer({ name: 'bg3-agent-bridge', version: VERSION }, { capabilities: { tools: {} } });
+        registerTools(server);
+        return server;
+    });
+}
+
+if (ranDirectly(import.meta.url)) serve();

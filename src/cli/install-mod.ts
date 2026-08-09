@@ -10,13 +10,11 @@ import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { fileURLToPath } from 'node:url';
 
 import { MOD_FOLDER, modsDir } from '../paths.js';
+import { packageRoot, ranDirectly } from '../runtime.js';
 
-const here = path.dirname(fileURLToPath(import.meta.url));
-const packageRoot = path.resolve(here, '..', '..');
-const workspace = path.join(packageRoot, 'mod');
+const workspace = path.join(packageRoot(), 'mod');
 
 /**
  * Places divine plausibly lives. LSLib ships as a zip with no installer, so
@@ -67,7 +65,7 @@ function findDivine(): string | null {
     return divineCandidates().find((candidate) => existsSync(candidate)) ?? null;
 }
 
-function main(): number {
+export function main(): number {
     const force = process.argv.includes('--force');
 
     if (!existsSync(workspace)) {
@@ -129,4 +127,4 @@ function main(): number {
     return 0;
 }
 
-process.exit(main());
+if (ranDirectly(import.meta.url)) process.exit(main());

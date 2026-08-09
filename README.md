@@ -42,7 +42,7 @@ Fine while you are actively modding — the only situation it is built for. Bad 
 **Uninstall it when you are done:**
 
 ```bash
-node scripts/install-dev.mjs --uninstall
+.\bg3-bridge install --uninstall
 ```
 
 Then remove the server from your agent's MCP config. `bg3_bridge_status` reports whether it is still live.
@@ -50,22 +50,17 @@ Then remove the server from your agent's MCP config. `bg3_bridge_status` reports
 ## Requirements
 
 - Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**. SE updates itself by default; older versions simply refuse to load the mod (`RequiredVersion`).
-- **[Node.js](https://nodejs.org/) 20 or newer** — the one hard prerequisite:
 
-  ```bash
-  winget install OpenJS.NodeJS.LTS
-  ```
-
-  `winget` ships with Windows 10 and 11; if it is missing, use the **LTS** installer from [nodejs.org](https://nodejs.org/). **Then open a new terminal** — installers only update `PATH` for windows opened afterwards. Verify with `node --version`; anything `v20+` is fine.
+That is the whole list — the release ships as a single `bg3-bridge.exe`, so there is **no Node.js, no npm, nothing to install first**. (Node 20+ is only needed to build from source.)
 
 You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Those are only for building your own `.pak` later.
 
 ## Install
 
-**1. Get the files.** Download `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. It ships already built.
+**1. Get the files.** Download `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod folder — one binary, no runtime to install.
 
 <details>
-<summary>From source instead (needs git and npm)</summary>
+<summary>From source instead (needs git, Node 20+, and npm)</summary>
 
 ```bash
 git clone https://github.com/MCW8/bg3-agent-bridge
@@ -73,12 +68,14 @@ cd bg3-agent-bridge
 npm install && npm run build
 ```
 
+Every command below then runs under Node instead of the exe: `node scripts/install-dev.mjs`, `node scripts/configure-agent.mjs`, `node scripts/check-bridge.mjs`. To build the exe itself, drop `bun.exe` ([Bun releases](https://github.com/oven-sh/bun/releases)) into `tools/` and run `npm run build:exe`.
+
 </details>
 
-**2. Install the mod, with the game closed:**
+**2. Install the mod, with the game closed.** In the folder you extracted:
 
 ```bash
-node scripts/install-dev.mjs
+.\bg3-bridge install
 ```
 
 Finds your BG3 install, copies the companion mod into `Data\Mods\` as loose files, and adds it to `modsettings.lsx` (backed up first; refuses to run while the game is open, because the game rewrites that file from memory on exit). `BG3_GAME_DIR` overrides the install search; `--uninstall` reverses it.
@@ -88,7 +85,7 @@ Loose files rather than a packed `.pak`, deliberately: a pak is read once at sta
 **3. Connect your agent:**
 
 ```bash
-node scripts/configure-agent.mjs
+.\bg3-bridge configure
 ```
 
 Prints an MCP config block with your real install path already in it. **Paste it into a chat with your AI agent and ask it to add the server to its MCP config**, then restart the agent. If yours cannot edit its own config, see [Connecting your AI agent](#connecting-your-ai-agent).
@@ -96,22 +93,22 @@ Prints an MCP config block with your real install path already in it. **Paste it
 **4. Verify.** Launch the game, load a save, and ask your agent to call `bg3_bridge_status`. Or, with no agent involved:
 
 ```bash
-node scripts/check-bridge.mjs
+.\bg3-bridge check
 ```
 
 That last one is the best first diagnostic: it talks to the game directly, so it separates "the bridge is broken" from "my agent is not wired up".
 
 ## Connecting your AI agent
 
-If the agent cannot edit its own config, the script can write it directly:
+If the agent cannot edit its own config, the exe can write it directly:
 
 ```bash
-node scripts/configure-agent.mjs --list                 # known configs, and whether each exists
-node scripts/configure-agent.mjs --write kimi           # Kimi Code
-node scripts/configure-agent.mjs --write claude-desktop
-node scripts/configure-agent.mjs --write cursor
-node scripts/configure-agent.mjs --write project        # .mcp.json in the current folder
-node scripts/configure-agent.mjs --path "C:/Users/you/.some-agent/mcp.json"   # anything else
+.\bg3-bridge configure --list                 # known configs, and whether each exists
+.\bg3-bridge configure --write kimi           # Kimi Code
+.\bg3-bridge configure --write claude-desktop
+.\bg3-bridge configure --write cursor
+.\bg3-bridge configure --write project        # .mcp.json in the current folder
+.\bg3-bridge configure --path "C:/Users/you/.some-agent/mcp.json"   # anything else
 ```
 
 It backs the file up first, merges rather than overwrites, creates the file if missing, and is safe to re-run.
@@ -125,8 +122,7 @@ Every MCP client reads the same shape; they differ only in where it lives.
 {
   "mcpServers": {
     "bg3-agent-bridge": {
-      "command": "node",
-      "args": ["C:/Users/you/bg3-agent-bridge/dist/index.js"]
+      "command": "C:/Users/you/bg3-agent-bridge/bg3-bridge.exe"
     }
   }
 }
@@ -134,7 +130,7 @@ Every MCP client reads the same shape; they differ only in where it lives.
 
 | Client | Where that goes |
 |---|---|
-| **Claude Code** | `claude mcp add bg3-agent-bridge -- node C:/path/to/dist/index.js`, or `.mcp.json` in the project root |
+| **Claude Code** | `claude mcp add bg3-agent-bridge -- C:/path/to/bg3-bridge.exe`, or `.mcp.json` in the project root |
 | **Claude Desktop** | `%APPDATA%\Claude\claude_desktop_config.json` |
 | **Kimi Code** | `%USERPROFILE%\.kimi-code\mcp.json` |
 | **Cursor** | `.cursor/mcp.json` in the project, or `~/.cursor/mcp.json` globally |
@@ -155,7 +151,7 @@ Only relevant once you are making mods rather than just running this. Packing ne
 1. Download `ExportTool-vX.Y.Z.zip` from [LSLib releases](https://github.com/Norbyte/lslib/releases) and extract it anywhere
 2. `set BG3_DIVINE_PATH=C:\path\to\Tools\divine.exe`
 
-[BG3 Modders Multitool](https://github.com/ShinyHobo/BG3-Modders-Multitool) bundles divine — point `BG3_DIVINE_PATH` at its `Tools` folder if you use it. `npm run install-mod` packs the companion mod, searching `PATH` and the usual extract locations.
+[BG3 Modders Multitool](https://github.com/ShinyHobo/BG3-Modders-Multitool) bundles divine — point `BG3_DIVINE_PATH` at its `Tools` folder if you use it. `.\bg3-bridge pack` packs the companion mod, searching `PATH` and the usual extract locations.
 
 Not vendored, deliberately: LSLib tracks game patches, so a bundled copy goes stale exactly when a patch lands, and shipping someone else's binary puts its integrity on this repo rather than upstream.
 
@@ -352,5 +348,7 @@ Ships no Larian assets and no Toolkit code. Larian's [modding terms](https://bal
 ## Contributing
 
 Adding an operation is two small edits: a handler in `mod/Mods/BG3AgentBridge/ScriptExtender/Lua/Bridge/Handlers.lua`, and a `defineTool` call in `src/index.ts`. The mailbox handles framing, ordering, errors, and timeouts.
+
+CLI commands live in `src/cli/`, shared by the Node wrappers in `scripts/` and the compiled exe (`src/cli/main.ts` dispatches). `npm run build:exe` rebuilds `dist/bg3-bridge.exe`; it needs `tools/bun.exe` from [Bun releases](https://github.com/oven-sh/bun/releases), which is gitignored and build-time-only.
 
 MIT licensed.

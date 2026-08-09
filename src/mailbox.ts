@@ -28,8 +28,14 @@ interface RawResponse {
     error?: string;
 }
 
-export class BridgeTimeoutError extends Error {}
-export class BridgeCallError extends Error {}
+// Explicit names: minification mangles constructor.name, and these labels are
+// shown to users diagnosing a dead bridge.
+export class BridgeTimeoutError extends Error {
+    override readonly name = 'BridgeTimeoutError';
+}
+export class BridgeCallError extends Error {
+    override readonly name = 'BridgeCallError';
+}
 
 const DEFAULT_TIMEOUT_MS = 8000;
 const DEFAULT_POLL_MS = 100;
