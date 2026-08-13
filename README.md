@@ -142,7 +142,7 @@ Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character 
 
 </details>
 
-**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 18 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
+**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 22 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
 
 ## Building your own mods
 
@@ -170,17 +170,43 @@ The `examples/` directory has three worked mods — a spell, an item, and a stat
 | `bg3_find_status_by_effect` | Reverse lookup: which statuses apply a given visual effect |
 | `bg3_preview_item` | Temporarily wear an item to see how it looks, then restore |
 | `bg3_preview_status` | Apply a status to see its effect, then clear it |
+| `bg3_spawn_character` | Spawn an NPC from a character template, then despawn or clear |
+| `bg3_animation` | Audition any animation, swap locomotion sets (idle+walk+run), or override the idle |
 | `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
 | `bg3_capture_sounds` | Record which sound events the game actually fires — "what sound was that?" |
-| `bg3_eval` | Run a Lua chunk in the live game and get its return values |
+| `bg3_eval` | Run a Lua chunk in the live game — captures prints, can borrow a mod's context, and can poll until a condition holds |
 | `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` |
 | `bg3_entity_inspect` | List an entity's components, or dump one by name |
+| `bg3_schema` | Field names and types of a component or resource, and which components on an entity are actually reachable |
 | `bg3_stats_get` | Read a stat entry or a single attribute |
 | `bg3_stats_set` | Write one stat attribute and sync it to clients |
-| `bg3_read_log` | Tail the newest Script Extender / Osiris log, with regex filtering |
-| `bg3_list_logs` | List available log files, newest first |
+| `bg3_read_log` | Read the Extender or Osiris log — pick the channel, regex-filter, or follow only new lines via cursor |
+| `bg3_list_logs` | List log files grouped by game session, newest first |
+| `bg3_trace_events` | Capture the ordered stream of Osiris story events, filtered by name and/or entity |
 
 Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_DIVINE_PATH`.
+
+## Reading logs and tracing events
+
+The log is the feedback channel for everything Lua and Osiris do, and it is split across channels: your mod's `print`/`Ext.Utils.Print` output and script errors land in the **Extender** log, story/rule traffic in the **Osiris** log. "Newest log overall" is usually the noisy Osiris one, so say which you mean:
+
+```
+bg3_read_log logType=extender filter="MyMod|error"     your mod's output and failures
+bg3_read_log logType=extender                          returns a cursor — pass it back
+bg3_read_log logType=extender cursor=96648             only lines appended since (follow mode)
+```
+
+Follow mode is the read-eval loop that used to require shell `tail`/`grep`: schedule diagnostic prints with `bg3_eval` (which also captures prints emitted during the call itself), then follow the extender log by cursor.
+
+To see **what actually fired and in what order** — the core of most Osiris debugging — trace story events:
+
+```
+bg3_trace_events action=start                          mark the position
+  … act in game, or via other bridge tools …
+bg3_trace_events action=read events="Status(Applied|Removed)" entity=64de046b-...
+```
+
+Event names come from the `>>> event Name(args)` lines in the Osiris Runtime log, so this needs Script Extender's Osiris logging enabled; lines carry no timestamps, so the stream is ordered but not timed. A bare UUID matches its prefixed template-name form (`S_Player_Laezel_58a6...`) inside event arguments.
 
 ## Finding asset GUIDs
 
@@ -295,6 +321,46 @@ bg3_preview_item action=restore                        put the original back
 
 Slot detection reads `Equipable.Slot`, which reports `Breast`; `Osi.GetEquipmentSlotForItem` returns an enum index (`1`) that `GetEquippedItem` will not accept.
 
+## Spawning NPCs
+
+`bg3_find_template` with `templateType=character` turns a name into a template UUID, then `bg3_spawn_character` places it — beside the host character by default, beside another character with `near`, or at exact `x`/`y`/`z`:
+
+```
+bg3_find_template query="Flaming Fist" templateType=character   pick a template Id
+bg3_spawn_character template=3423bf45-...                       spawn it 2m from you (action defaults to spawn when a template is given)
+bg3_spawn_character action=list                                 what is tracked, still on stage?
+bg3_spawn_character action=clear                                remove them all
+```
+
+**The trap this wraps is `Osi.CreateAt`'s arity.** It takes exactly 7 arguments — `(templateId, x, y, z, temporary, playSpawn, customName)` — and every shorter form fails with "No function named 'CreateAt' exists that can be called with N parameters", which never says the wanted count. The fifth argument is `temporary`, not `playSpawn` — a character meant to persist passes 0, while `bg3_preview_item` passes 1 so the engine treats its gear as disposable.
+
+A spawn is written into the save, so the tool tracks what it created: `despawn` removes one (`Osi.SetOnStage(id, 0)` offloads rather than destroys, and `Osi.IsOnStage` is the check that matters — the entity id stays valid off-stage), `clear` removes all. A `bg3_reload` wipes the tracking list while the characters persist, so clear *before* reloading.
+
+## Auditioning animations and overriding the idle
+
+`bg3_animation` covers three jobs: `action=find` resolves a name ("flying kiss") to its `AnimationShortName` GUID, `action=play`/`loop` fires it on a character, and `action=idle` replaces the idle animation with a still-animation state:
+
+```
+bg3_animation action=find query="flying kiss"        name → GUID
+bg3_animation action=play animation="flying kiss"    one-shot on the host character
+bg3_animation action=idle stillType=Dazed            idle becomes the drunk sway
+bg3_animation action=clear                           restore everything
+```
+
+**`Osi.PlayAnimation` resolves only the bare GUID.** The reference form the game displays everywhere else — `5f127742-79d4-4590-839f-6eb5ae45930d(REAC_Magic_External_Combat_01)` — is a silent no-op when passed to `PlayAnimation`; the `(name)` suffix must be stripped (the tool does this for you). **`Osi.PlayLoopingAnimation` looks dead but isn't**: arities 2-6 all fail with "No function named", and the true signature is **eight arguments** with the animation reference in position 3 — `PlayLoopingAnimation(character, "", guid, "", "", "", "", "")`. It loops `Looping=false` animations continuously and holds statue poses indefinitely; movement is blocked while one runs, and crouching breaks it one-way. End one with `Osi.StopAnimation(character, 1)` — the second argument is the animation channel, a number, which is why passing an animation name errors with "Number expected for argument 3". (The bogus-name `PlayLoopingAnimation` the Emotes mod fires in one ping handler is a pose interrupt, not a general cancel — tried as one, the loop kept running.) The looping-call signature comes from the source of the [Emotes mod](https://www.nexusmods.com/baldursgate3/mods/4744) by claravel — `action=loop`/`stop` wrap exactly these calls.
+
+**The strongest override is `action=animset`.** A status's `DynamicAnimationTag` field, pointing at an `AnimationSetPriority` entry (~100 registered sets: `Zombie`, `on_all_fours`, `Bladesong`, crowd sits and staggers), swaps the character's *entire locomotion set* — idle, walk and run — through the same channel RAGE uses, so movement is never blocked. When a clean status already carries the tag it is used directly; otherwise the tool live-edits the tag onto the carrier and restores it on `clear`. This is how animation-replacement mods actually work: the On All Fours Toggle mod ships no animation data at all — a toggleable passive applies a hidden status whose tag selects the base game's own quadruped set. Custom sets need a pak registering an `AnimationSetPriority` (name + GUID + priority) plus the GR2s; custom *animations* need only the FFMegaPosePack recipe — GR2 files plus name+UUID rows in `Animation/ShortNames.lsx` make them callable by `play`/`loop` immediately.
+
+**The persistent idle override is a status trick.** Idle ("still") animations are selected by a status's `StillAnimationType` enum — about 29 states (`Dazed`, `Dancing`, `Feared`, `Laughing`, …), `action=list` shows them with the statuses that carry each. `action=idle` live-edits the field on a *clean carrier* — a status with no Boosts and no RemoveEvents, so the override brings no mechanics — and applies it; it re-asserts every time the character stops moving (DRUNK proves the pattern in vanilla). Two traps: PERFORM_* statuses are performance *sessions* that movement cancels, not idle overrides; and a still type with no art for the character's race freezes them mid-pose instead of falling back — audition on the target character.
+
+**There is no way to make an arbitrary *animation* the idle — but `animset` covers registered *sets*.** The status `AnimationLoop` field (Hold Person's freeze) is ignored on BOOST-type statuses — probed with a correctly formatted reference, nothing played — so single-animation idle replacement is limited to the `StillAnimationType` enum. And the packed-data route is narrower than it looks: shipping a GR2 at the base idle's exact virtual path (`<RIG>_ST_IDLE_Still_Peace_01.GR2`) in a mod pak does **not** shadow it — tested with a mounted pak (loadIndex 19, last in order); the engine kept the base resource (`IsModded=false`, base duration). What mods do instead is register an `AnimationSetPriority` and switch to it with a status tag — see above — which replaces idle *and* walk with no movement penalty.
+
+**Photo-mode poses cannot be frozen at an arbitrary frame outside photo mode.** A pose is not a resource — it is a Timing marker inside a parent animation (`PhotoModeEmotePose` maps pose → `AnimationShortName` + frame point), and holding one at mid-animation needs the animation graph paused, which nothing exposes: `Osi.Freeze` is a story-event control lock, not an animation hold; the `AnimationWaterfall` components carry no speed/pause field; and the Animation resource's `Offset` is live-writable but setting it past 0 silences playback rather than seeking. What works live is `action=loop` on the pose's parent animation (e.g. `PM_PowerRangers_01` = "Fighting Crime"): for statue-style parents the engine loop simply *holds the pose*, which is how the Emotes mod's pose spells work.
+
+**A held pose still fails as an idle replacement.** The loop blocks movement input outright, so a movement watcher cannot see motion to cancel on; the only release is crouching (sneak breaks the loop one-way), and a stop-watcher can re-apply the pose after — tried exactly this, and it works mechanically but means crouching before *every* walk, which is too much friction for an idle. It is a workable *mechanic* though: a character forced into a looped pose the player must crouch out of each time (exhaustion, curses, possession) is achievable with a dozen lines of Lua.
+
+Everything `bg3_animation` changes is session-only by design: runtime stat edits and applied statuses die with a `bg3_reload` or save reload, and `action=clear` restores the carrier's original `StillAnimationType` immediately.
+
 ## A note on RequiredVersion
 
 `ScriptExtender/Config.json` declares `"RequiredVersion": 32`, and that number does more than gate loading. From the Script Extender docs:
@@ -335,7 +401,7 @@ Reloading a *save* applies none of these — it re-reads the save, not the modul
 
 **Hot reload is not per-context.** `Ext.Debug.Reset()` restarts **both** server and client VMs whichever context asks — all in-memory Lua state goes with it, including `bg3_stats_set` edits. The `context` argument picks the transport, not the scope.
 
-**`bg3_eval` does not run inside your mod's sandbox.** Chunks compile into the default global table: `Ext`, `Osi`, `Mods` are reachable, your mod's bare globals are not. Reach mod state through `Mods.<ModTable>`.
+**`bg3_eval` does not run inside your mod's sandbox.** Chunks compile into the default global table: `Ext`, `Osi`, `Mods` are reachable, your mod's bare globals are not — `PersistentVars` in particular is the bridge mod's (nil), since SE scopes it per mod. Reach mod state through `Mods.<ModTable>.PersistentVars`, or pass `modContext="<ModFolder>"` to run the chunk with that mod's `PersistentVars`/`ModuleUUID` swapped in.
 
 **The loop is slower than Unity's.** The game boots in about a minute and needs a loaded save — keep one instance alive and iterate against it. `client` only answers once a save is loaded; `server` is the right default for almost everything.
 

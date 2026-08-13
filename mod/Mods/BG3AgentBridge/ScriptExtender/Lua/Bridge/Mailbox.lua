@@ -52,6 +52,19 @@ local function respond(seq, ok, payload)
     Ext.IO.SaveFile(Bridge.paths_.response, encoded)
 end
 
+--- A handler returns this sentinel to take over the response itself and reply
+--- later via Bridge.Respond — eval's pollUntil/captureMs windows settle on a
+--- timer, after dispatch has already returned. While a deferred reply is
+--- pending, later requests still dispatch normally; their replies can briefly
+--- share the single response file, so agents should not run calls in parallel
+--- with a deferred one.
+Bridge.DEFERRED = {}
+
+--- Exported so deferred handlers can answer their own request.
+function Bridge.Respond(seq, ok, payload)
+    respond(seq, ok, payload)
+end
+
 local function dispatch(request)
     local seq = tonumber(request.seq)
     if seq == nil or seq <= lastSeq then
@@ -69,7 +82,12 @@ local function dispatch(request)
         return
     end
 
-    local ok, result = pcall(handler, request.params or {})
+    -- Handlers get the sequence number as a second argument: only deferred
+    -- responders need it, and existing handlers ignore it.
+    local ok, result = pcall(handler, request.params or {}, seq)
+    if ok and result == Bridge.DEFERRED then
+        return
+    end
     respond(seq, ok, result)
 
     if Bridge.pendingReset then

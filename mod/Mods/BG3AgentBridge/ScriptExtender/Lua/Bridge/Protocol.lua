@@ -46,10 +46,15 @@ end
 --- Returns chunk, nil on success or nil, errorMessage on failure.
 ---
 --- Script Extender's `load` does not take standard Lua's chunk-name string as
---- argument 2 — it expects an environment table there. Passing only the source
---- is the portable call across both shapes.
-function Bridge.compile(code)
+--- argument 2 — it expects an environment table there, which eval uses to give
+--- chunks a per-call environment (print capture, mod context). loadstring has
+--- no environment parameter; on a build offering only loadstring the chunk
+--- compiles without one and eval degrades to the shared environment.
+function Bridge.compile(code, env)
     if type(load) == "function" then
+        if env ~= nil then
+            return load(code, env)
+        end
         return load(code)
     end
     if type(loadstring) == "function" then

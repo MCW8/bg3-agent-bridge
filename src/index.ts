@@ -7,8 +7,8 @@ import { McpServer, type StandardSchemaWithJSON } from '@modelcontextprotocol/se
 import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import * as z from 'zod';
 
-import { callBridge, readHello, type BridgeContext } from './mailbox.js';
-import { listLogFiles, tailLog } from './logs.js';
+import { callBridge, readHello, type BridgeContext, type CallOptions } from './mailbox.js';
+import { listLogSessions, tailLog } from './logs.js';
 import { bridgeDir, logDirectories } from './paths.js';
 import { ranDirectly } from './runtime.js';
 
@@ -94,13 +94,25 @@ function defineTool<S extends z.ZodType>(
 }
 
 /** Every bridge call funnels through here so failures read as messages, not stack traces. */
-async function bridge(context: BridgeContext, op: string, params: Record<string, unknown> = {}): Promise<ToolResult> {
+async function bridge(
+    context: BridgeContext,
+    op: string,
+    params: Record<string, unknown> = {},
+    options: CallOptions = {},
+): Promise<ToolResult> {
     try {
-        return json(await callBridge(context, op, params));
+        return json(await callBridge(context, op, params, options));
     } catch (error) {
         return failure((error as Error).message);
     }
 }
+
+/**
+ * The active bg3_trace_events capture: which Osiris log and how far it has
+ * been read. Module-level so read calls without an explicit cursor continue
+ * where the last one stopped.
+ */
+let traceCapture: { file: string; cursor: number } | null = null;
 
 function registerTools(server: McpServer): void {
     defineTool(
@@ -232,6 +244,145 @@ function registerTools(server: McpServer): void {
         },
         async ({ action, status, duration, character, context }) =>
             bridge(context, 'status.preview', { action, status, duration, character }),
+    );
+
+    defineTool(
+        server,
+        'bg3_spawn_character',
+        {
+            title: 'Spawn an NPC from a character template',
+            description:
+                'Spawn a character from a root template UUID (find one with bg3_find_template, templateType=character), ' +
+                'by default 2m from the host character — pass near to anchor to someone else, or x/y/z for an exact spot. ' +
+                'This wraps Osi.CreateAt, whose signature is the trap: it takes exactly 7 arguments ' +
+                '(templateId, x, y, z, temporary, playSpawn, customName) and every shorter form fails with an overload ' +
+                'error that never says the wanted count. Spawned characters are tracked so action=despawn or clear can ' +
+                'remove them; a spawn persists in the save otherwise. ALWAYS clear test spawns when done. Spawning is ' +
+                'server-side, so this tool always targets the server context.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['spawn', 'despawn', 'clear', 'list'])
+                    .optional()
+                    .describe(
+                        'spawn creates a character (the default when template is given), despawn removes one by id, clear ' +
+                            'removes everything this tool spawned, list (the default with no template) shows what is ' +
+                            'tracked and whether it is still on stage',
+                    ),
+                template: z
+                    .string()
+                    .optional()
+                    .describe('Character root template UUID, from bg3_find_template. Required for spawn.'),
+                near: z
+                    .string()
+                    .optional()
+                    .describe('Character UUID to spawn beside; defaults to the host character. Ignored when x/y/z are given.'),
+                offset: z
+                    .number()
+                    .default(2)
+                    .describe('Metres from `near` to place the spawn on the x axis, when no x/y/z are given'),
+                x: z.number().optional().describe('World x; requires y and z too, and overrides near/offset'),
+                y: z.number().optional().describe('World y'),
+                z: z.number().optional().describe('World z'),
+                name: z.string().optional().describe('Custom name for the spawned character; empty keeps the template\'s'),
+                playSpawn: z
+                    .boolean()
+                    .default(false)
+                    .describe('Play the spawn-in animation and sound instead of appearing instantly'),
+                id: z.string().optional().describe('Character UUID to despawn. Required for despawn; take it from action=list.'),
+            }),
+        },
+        // Hardcoded to server: Osi.CreateAt is a story call and only the server
+        // VM can create entities, so offering a context argument would only
+        // offer a way to get an error.
+        //
+        // action defaults by intent: a call carrying a template means spawn —
+        // the previous unconditional "list" default turned a template-only
+        // call into a silent no-op that returned {count: 0, spawned: []}.
+        async ({ action, template, near, offset, x, y, z, name, playSpawn, id }) =>
+            bridge('server', 'character.spawn', {
+                action: action ?? (template !== undefined && template !== '' ? 'spawn' : 'list'),
+                template,
+                near,
+                offset,
+                x,
+                y,
+                z,
+                name,
+                playSpawn,
+                id,
+            }),
+    );
+
+    defineTool(
+        server,
+        'bg3_animation',
+        {
+            title: 'Audition animations and override the idle',
+            description:
+                'Play any animation on a character (one-shot or engine-looped), swap their whole locomotion set, or ' +
+                'replace their idle animation with a named still-animation state (Dazed, Dancing, Feared, Laughing, … ' +
+                '— action=list shows all ~29 still types plus the ~100 locomotion sets). Probed facts that shape this ' +
+                'tool: Osi.PlayAnimation resolves ONLY the bare AnimationShortName GUID — the "GUID(name)" display ' +
+                'form is a silent no-op, and the tool strips the suffix if you paste it. Osi.PlayLoopingAnimation ' +
+                'looks dead (arities 2-6 all fail) but its true signature is 8 arguments with the animation in ' +
+                'position 3 — loop mode uses it to hold statue poses indefinitely and loop animations continuously; ' +
+                'movement is blocked while a loop runs and crouching breaks it one-way, so use stop/clear ' +
+                '(Osi.StopAnimation(character, 1) — the channel number, not a name) to end one. action=animset is the ' +
+                'strongest override: a status DynamicAnimationTag pointing at an AnimationSetPriority entry swaps ' +
+                'idle, walk AND run with normal movement — the RAGE/Bladesong channel, and how the On All Fours crawl ' +
+                'mod works. The status AnimationLoop field is ignored on BOOST statuses (it is the incapacitation ' +
+                'freeze, not an idle override); action=idle live-edits StillAnimationType on a clean carrier instead. ' +
+                'Everything is session-only and action=clear restores edited stats and cancels loops. ' +
+                'ALWAYS clear when done. Server-side only.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['find', 'play', 'loop', 'stop', 'idle', 'animset', 'clear', 'list'])
+                    .default('list')
+                    .describe(
+                        'find resolves a name to AnimationShortName GUIDs; play fires a one-shot; loop starts an ' +
+                            'engine-level loop (or held pose); stop cancels all loops; idle overrides the idle ' +
+                            'animation; animset swaps the whole locomotion set (idle, walk, run) via a status ' +
+                            'DynamicAnimationTag — the engine-native channel with free movement; clear undoes ' +
+                            'everything this tool changed; list shows still types, animation sets, carriers and ' +
+                            'what is active',
+                    ),
+                query: z.string().optional().describe('Name to search for with action=find, e.g. "flying kiss", "wave", "bow"'),
+                animation: z
+                    .string()
+                    .optional()
+                    .describe('AnimationShortName GUID or name, e.g. "PM_Flying kiss_01". Required for play and loop.'),
+                set: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'AnimationSetPriority name for action=animset, e.g. "Zombie", "on_all_fours", "Bladesong". ' +
+                            'See action=list for the full set. An existing clean ANIM_OVERRIDE status is used when ' +
+                            'one carries the tag; otherwise the carrier status is live-edited and restored on clear.',
+                    ),
+                character: z.string().optional().describe('Character UUID; defaults to the host character'),
+                stillType: z
+                    .string()
+                    .optional()
+                    .describe('Still-animation state for action=idle, e.g. "Dazed", "Dancing", "Feared". See action=list.'),
+                carrier: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Status to carry the idle override, default ANIM_COWER — must have no Boosts and no RemoveEvents; ' +
+                            'action=list flags clean carriers per still type. The carrier\'s StillAnimationType is ' +
+                            'live-edited session-only and restored on clear.',
+                    ),
+                duration: z.number().default(600).describe('Seconds the idle-override status lasts; clear does not wait for this'),
+                allowBoosts: z
+                    .boolean()
+                    .default(false)
+                    .describe('Permit a carrier status that has Boosts — the override would carry those mechanics with it'),
+            }),
+        },
+        // Hardcoded to server: PlayAnimation and ApplyStatus are story calls,
+        // so a context argument would only offer a way to get an error.
+        async ({ action, query, animation, set, character, stillType, carrier, duration, allowBoosts }) =>
+            bridge('server', 'animation', { action, query, animation, set, character, stillType, carrier, duration, allowBoosts }),
     );
 
     defineTool(
@@ -452,13 +603,69 @@ function registerTools(server: McpServer): void {
             title: 'Evaluate Lua in the running game',
             description:
                 'Run a Lua chunk inside the live game and return its values. Use `return` to get a value back. ' +
+                'print/Ext.Utils.Print output emitted during the call is captured and returned as `prints` — no more ' +
+                'eval-then-grep-the-log for diagnostics. The chunk runs in the bridge mod\'s own context: bare ' +
+                '`PersistentVars` is the bridge\'s (nil), so to touch another mod\'s state either use ' +
+                '`Mods.<Folder>.PersistentVars` or pass modContext to run the chunk with that mod\'s ' +
+                'PersistentVars/ModuleUUID swapped in. Game state often settles asynchronously (status applies, scene ' +
+                'teardown): pollUntil re-evaluates a Lua predicate until it is truthy or timeoutMs elapses and returns ' +
+                'the outcome as `polled`, and captureMs keeps collecting prints for a window after the chunk returns ' +
+                'so timers it scheduled are captured too. Avoid parallel bridge calls while a pollUntil is active. ' +
                 'Availability depends on the Script Extender build exposing load() to mod scripts — check bg3_bridge_status first.',
             inputSchema: z.object({
                 code: z.string().min(1).describe('Lua source to execute, e.g. "return Osi.GetHostCharacter()"'),
                 context: contextSchema,
+                modContext: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Folder (directory) name of the mod whose PersistentVars/ModuleUUID the chunk should see, e.g. ' +
+                            '"a scene-manager mod". Get folder names from bg3_list_mods.',
+                    ),
+                pollUntil: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Lua predicate (expression or chunk) re-evaluated after `code` runs until truthy or timeout — ' +
+                            'e.g. "Ext.Entity.Get(uuid).Health.Hp == 0". The reply waits for the outcome.',
+                    ),
+                timeoutMs: z
+                    .number()
+                    .int()
+                    .min(100)
+                    .max(60000)
+                    .default(5000)
+                    .describe('Longest pollUntil waits before reporting satisfied:false'),
+                intervalMs: z
+                    .number()
+                    .int()
+                    .min(50)
+                    .max(10000)
+                    .default(250)
+                    .describe('Delay between pollUntil checks'),
+                captureMs: z
+                    .number()
+                    .int()
+                    .min(0)
+                    .max(30000)
+                    .default(0)
+                    .describe(
+                        'Keep capturing prints for this long after the chunk returns, so Ext.Timer callbacks it ' +
+                            'scheduled are included. The reply waits for the window.',
+                    ),
             }),
         },
-        async ({ code, context }) => bridge(context, 'eval', { code }),
+        async ({ code, context, modContext, pollUntil, timeoutMs, intervalMs, captureMs }) => {
+            // The reply is deferred until the poll/capture window closes, so the
+            // bridge timeout must outlast it with margin for the mailbox poll.
+            const windowMs = Math.max(pollUntil !== undefined && pollUntil !== '' ? timeoutMs : 0, captureMs);
+            return bridge(
+                context,
+                'eval',
+                { code, modContext, pollUntil, timeoutMs, intervalMs, captureMs },
+                { timeoutMs: windowMs + 8000 },
+            );
+        },
     );
 
     defineTool(
@@ -489,6 +696,40 @@ function registerTools(server: McpServer): void {
             }),
         },
         async ({ id, component, depth, context }) => bridge(context, 'entity.get', { id, component, depth }),
+    );
+
+    defineTool(
+        server,
+        'bg3_schema',
+        {
+            title: 'Inspect component and resource field schemas',
+            description:
+                'Answer "what fields does this component/resource actually have" without a runtime error per guess. ' +
+                'SE exposes no type registry to mod scripts, so the schema is read from a live instance. ' +
+                'action=components lists every component on an entity with an `accessible` flag and which listing ' +
+                'reported it — GetAllComponents() and GetAllComponentNames() DISAGREE on some entities, and a listed ' +
+                'name is no guarantee the indexer accepts it (e.StatusManager raises; the reachable component is ' +
+                'e.StatusContainer with a Statuses field). action=fields dumps one component\'s field names, value ' +
+                'types and scalar previews — the direct fix for guessing .Name vs .SourceFile (visual/animation ' +
+                'resources only have SourceFile) or .TempHp vs .TemporaryHp (it is TemporaryHp/MaxTemporaryHp). ' +
+                'action=resource samples a resource bank the same way — loaded entries only, banks do not list ' +
+                'pak-defined resources the game has not loaded.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['components', 'fields', 'resource'])
+                    .default('components')
+                    .describe('components lists an entity\'s components with accessibility; fields dumps one component; resource samples a bank'),
+                entity: z.string().optional().describe('Entity UUID. Required for components and fields.'),
+                component: z
+                    .string()
+                    .optional()
+                    .describe('Component for action=fields; short ("Health") or qualified ("eoc::HealthComponent") form both work'),
+                type: z.string().optional().describe('Resource bank for action=resource, e.g. "Animation", "Visual"'),
+                context: contextSchema,
+            }),
+        },
+        async ({ action, entity, component, type, context }) =>
+            bridge(context, 'schema', { action, entity, component, type }),
     );
 
     defineTool(
@@ -561,7 +802,7 @@ function registerTools(server: McpServer): void {
             if (result.isError === true) return result;
             return text(
                 `Lua VM reset scheduled (requested via the ${context} context; both server and client VMs restart). ` +
-                    `Give it a moment, then call bg3_read_log with namePattern "Extender Runtime" to see whether your ` +
+                    `Give it a moment, then call bg3_read_log with logType "extender" to see whether your ` +
                     `scripts reloaded cleanly.`,
             );
         },
@@ -573,34 +814,61 @@ function registerTools(server: McpServer): void {
         {
             title: 'Read Script Extender logs',
             description:
-                'Tail the newest Script Extender or Osiris log. This is where Lua errors surface, so it is the tool to reach for ' +
-                'after bg3_reload or when a script silently does nothing.',
+                'Read a Script Extender log — the primary feedback channel for Lua and Osiris behavior. Pick the channel with ' +
+                'logType: "extender" holds your mod\'s print/Ext.Utils.Print output and script errors, "osiris" holds ' +
+                'story/rule traffic (the >>> event ... lines). Cut noise with filter (a regex — your mod name, or "error"). ' +
+                'For a live read-eval loop, follow mode is the key feature: pass the cursor from a previous response to get ' +
+                'ONLY lines appended since — schedule your diagnostic prints with bg3_eval, then follow the extender log ' +
+                'instead of re-reading the whole tail. head=true reads from the top of the file (session startup).',
             inputSchema: z.object({
-                lines: z.number().int().min(1).max(2000).default(100).describe('How many trailing lines to return'),
+                lines: z.number().int().min(1).max(2000).default(100).describe('How many lines to return'),
+                logType: z
+                    .enum(['extender', 'osiris'])
+                    .optional()
+                    .describe(
+                        'Which channel to read: "extender" for Lua output and script errors, "osiris" for story/rule logs. ' +
+                            'Defaults to the newest log of any channel — which is usually the noisy Osiris one, so set this.',
+                    ),
                 filter: z
                     .string()
                     .optional()
                     .describe('Case-insensitive regular expression; use your mod name or "error" to cut noise'),
+                cursor: z
+                    .number()
+                    .int()
+                    .min(0)
+                    .optional()
+                    .describe(
+                        'Byte offset from a previous response\'s cursor field: return only lines appended since. ' +
+                            'If the file rotated in between, the response flags truncated:true and starts over.',
+                    ),
+                head: z.boolean().default(false).describe('Read from the start of the file instead of the end'),
                 file: z.string().optional().describe('Absolute path to a specific log file; omit to use the newest'),
                 namePattern: z
                     .string()
                     .optional()
                     .describe(
-                        'Substring of the log filename to pick which log to read. Script Extender writes several at once — ' +
-                            'use "Extender Runtime" for Lua output and script errors, "Osiris" for story/rule logs.',
+                        'Substring of the log filename to pick which log to read. logType is the reliable form of this; ' +
+                            'namePattern remains for unusually named files.',
                     ),
             }),
         },
-        async ({ lines, filter, file, namePattern }) => {
+        async ({ lines, logType, filter, cursor, head, file, namePattern }) => {
             try {
-                const result = await tailLog({ lines, filter, file, namePattern });
+                const result = await tailLog({ lines, logType, filter, cursor, head, file, namePattern });
                 if (result.file === null) {
                     return failure(
                         `No log files found. Searched: ${logDirectories().join(', ') || '(no known log directory exists)'}. ` +
                             `Script Extender logging may be disabled in ScriptExtenderSettings.json.`,
                     );
                 }
-                return text(`${result.file} (${result.matched} matching lines)\n\n${result.lines.join('\n')}`);
+                const flags = [
+                    `${result.matched} matching lines`,
+                    `cursor: ${result.cursor}`,
+                    result.truncated === true ? 'truncated: file shrank under the cursor, restarted from the top' : null,
+                    result.capped === true ? 'capped: read limit hit, earlier content skipped' : null,
+                ].filter((flag) => flag !== null);
+                return text(`${result.file} (${flags.join('; ')})\n\n${result.lines.join('\n')}`);
             } catch (error) {
                 return failure((error as Error).message);
             }
@@ -609,18 +877,147 @@ function registerTools(server: McpServer): void {
 
     defineTool(
         server,
+        'bg3_trace_events',
+        {
+            title: 'Trace Osiris story events',
+            description:
+                'Capture the ordered stream of Osiris story events — what actually fired and in what order — by ' +
+                'following the Osiris Runtime log. start marks a position, you act in game (or via other bridge ' +
+                'tools), then read returns every `>>> event` line since, oldest first, optionally narrowed to an ' +
+                'event-name regex and/or an entity UUID (substring match — a bare UUID also matches its prefixed ' +
+                'template-name form inside event arguments). This is the fastest way to answer "did my handler fire, ' +
+                'and what ran before it" — e.g. discovering that vanilla incapacitation stripped a status before a ' +
+                'mod\'s own StatusRemoved handler. Log lines carry no timestamps, so order is log order. Requires ' +
+                'Script Extender\'s Osiris logging to be enabled; start tells you when no Osiris log exists at all.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['start', 'read', 'stop'])
+                    .default('read')
+                    .describe('start begins a capture at the current end of the log; read returns events since; stop discards the capture'),
+                events: z
+                    .string()
+                    .optional()
+                    .describe('Case-insensitive regex matched against the event name, e.g. "Status(Applied|Removed)|Died"'),
+                entity: z
+                    .string()
+                    .optional()
+                    .describe('Only events whose argument text contains this string — a character UUID narrows to one actor'),
+                limit: z.number().int().min(1).max(5000).default(500).describe('Maximum events returned per read'),
+                cursor: z
+                    .number()
+                    .int()
+                    .min(0)
+                    .optional()
+                    .describe('Explicit byte offset to read from, instead of the stored capture position'),
+            }),
+        },
+        async ({ action, events, entity, limit, cursor }) => {
+            if (action === 'stop') {
+                const had = traceCapture !== null;
+                traceCapture = null;
+                return text(had ? 'Trace capture stopped and discarded.' : 'No trace capture was active.');
+            }
+
+            if (action === 'start') {
+                const probe = await tailLog({ logType: 'osiris', lines: 1 });
+                if (probe.file === null) {
+                    return failure(
+                        'No Osiris Runtime log found — Script Extender\'s Osiris logging appears to be disabled. ' +
+                            'Enable it in ScriptExtenderSettings.json and restart the game.',
+                    );
+                }
+                traceCapture = { file: probe.file, cursor: probe.cursor ?? 0 };
+                return json({
+                    file: probe.file,
+                    cursor: traceCapture.cursor,
+                    note: 'Capture started. Act in game, then call action=read — optionally with events/entity filters.',
+                });
+            }
+
+            // read
+            if (traceCapture === null && cursor === undefined) {
+                return failure('No trace capture is active — call action=start first, or pass an explicit cursor with file.');
+            }
+            const from = cursor ?? traceCapture!.cursor;
+            const file = traceCapture?.file;
+            // Filter BEFORE limiting: the line cap must apply to matched events,
+            // not raw log lines — a busy session logs thousands of rule/exec
+            // lines between events, and a raw pre-limit would silently drop them.
+            // The 512KB read cap still bounds one read; capped:true flags the skip.
+            const result = await tailLog({ file, logType: 'osiris', cursor: from, lines: 1_000_000 });
+            if (result.file === null) {
+                return failure('No Osiris Runtime log found.');
+            }
+
+            let namePattern: RegExp | null = null;
+            if (events !== undefined && events !== '') {
+                try {
+                    namePattern = new RegExp(events, 'i');
+                } catch (error) {
+                    return failure(`events is not a valid regular expression: ${(error as Error).message}`);
+                }
+            }
+
+            const parsed: { event: string; args: string; line: string }[] = [];
+            for (const line of result.lines) {
+                const match = /^>>> event ([^(]+)\((.*)\)\s*$/.exec(line);
+                const name = match?.[1];
+                if (match === null || name === undefined) continue;
+                if (namePattern !== null && !namePattern.test(name)) continue;
+                if (entity !== undefined && entity !== '' && !line.includes(entity)) continue;
+                parsed.push({ event: name, args: match[2] ?? '', line });
+                if (parsed.length >= limit) break;
+            }
+
+            if (traceCapture !== null && result.file === traceCapture.file) {
+                traceCapture.cursor = result.cursor ?? from;
+            }
+
+            return json({
+                file: result.file,
+                events: parsed,
+                matched: parsed.length,
+                cursor: result.cursor,
+                ...(result.truncated === true ? { truncated: 'log shrank under the cursor; restarted from the top' } : {}),
+                ...(result.capped === true ? { capped: 'read limit hit between reads; some log content was skipped' } : {}),
+                note: 'Order is log order; lines carry no timestamps. Pass cursor back (or just call read again) to continue.',
+            });
+        },
+    );
+
+    defineTool(
+        server,
         'bg3_list_logs',
         {
             title: 'List available log files',
-            description: 'List Script Extender and Osiris log files, newest first, for use with bg3_read_log.',
-            inputSchema: z.object({}),
+            description:
+                'List Script Extender and Osiris log files grouped by game session, newest session first — each launch ' +
+                'writes an Extender and an Osiris log a few seconds apart. Use the file paths with bg3_read_log.',
+            inputSchema: z.object({
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(100)
+                    .default(10)
+                    .describe('How many sessions to return; older history is rarely useful'),
+            }),
         },
-        async () => {
-            const files = await listLogFiles();
-            if (files.length === 0) {
+        async ({ limit }) => {
+            const sessions = await listLogSessions(limit);
+            if (sessions.length === 0) {
                 return failure(`No log files found. Searched: ${logDirectories().join(', ') || '(none)'}`);
             }
-            return json(files.map((entry) => ({ file: entry.file, modified: new Date(entry.modifiedMs).toISOString() })));
+            return json(
+                sessions.map((session) => ({
+                    started: new Date(session.startedMs).toISOString(),
+                    files: session.files.map((entry) => ({
+                        file: entry.file,
+                        type: entry.type,
+                        modified: new Date(entry.modifiedMs).toISOString(),
+                    })),
+                })),
+            );
         },
     );
 }

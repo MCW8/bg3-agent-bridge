@@ -28,6 +28,26 @@ function Bridge.componentAliases(name)
         add((string.gsub(short, "Component$", "")))
     end
 
+    -- Namespace-qualified names often index under the joined short form:
+    -- eoc::status::ContainerComponent is reached as e.StatusContainer, and
+    -- none of the aliases above produce that (probed live). Any wrong guess
+    -- costs one pcall, which resolveComponent already pays per candidate.
+    local parts = {}
+    for segment in string.gmatch(name, "[^:]+") do
+        parts[#parts + 1] = segment
+    end
+    if #parts > 2 then
+        local joined = {}
+        for i = 2, #parts do
+            local segment = parts[i]
+            if i == #parts then
+                segment = (string.gsub(segment, "Component$", ""))
+            end
+            joined[#joined + 1] = string.upper(string.sub(segment, 1, 1)) .. string.sub(segment, 2)
+        end
+        add(table.concat(joined))
+    end
+
     return aliases
 end
 
@@ -1431,6 +1451,726 @@ H["status.preview"] = function(params)
     }
 end
 
+--- Characters spawned through this handler, so despawn and clear can find
+--- them again. CreateAt writes the character into the save — without tracking,
+--- the only way back from an unwanted spawn is reloading the save. A VM reset
+--- (bg3_reload) loses this list while the characters persist, so clear can no
+--- longer reach them afterwards.
+local spawnedCharacters = {}
+
+--- An entity id stays valid after SetOnStage(id, 0) — the character is
+--- offloaded, not destroyed — so existence is no proof it is still in the
+--- world. IsOnStage answers the question that matters.
+local function onStage(id)
+    local stage = false
+    pcall(function()
+        stage = Osi.IsOnStage(id) == 1
+    end)
+    return stage
+end
+
+H["character.spawn"] = function(params)
+    local action = params.action or "list"
+
+    if action == "list" then
+        local entries = {}
+        for _, entry in ipairs(spawnedCharacters) do
+            entries[#entries + 1] = {
+                id = entry.id,
+                template = entry.template,
+                templateName = entry.templateName,
+                x = entry.x,
+                y = entry.y,
+                z = entry.z,
+                onStage = onStage(entry.id),
+            }
+        end
+        return { spawned = entries, count = #entries }
+    end
+
+    if action == "despawn" then
+        local id = params.id
+        if type(id) ~= "string" or id == "" then
+            error("params.id is required for despawn — a character UUID from action=list")
+        end
+        local ok, err = pcall(function()
+            Osi.SetOnStage(id, 0)
+        end)
+        if not ok then
+            error("SetOnStage failed: " .. tostring(err))
+        end
+        for index, entry in ipairs(spawnedCharacters) do
+            if entry.id == id then
+                table.remove(spawnedCharacters, index)
+                break
+            end
+        end
+        return { despawned = id, tracked = #spawnedCharacters }
+    end
+
+    if action == "clear" then
+        local removed = {}
+        for _, entry in ipairs(spawnedCharacters) do
+            pcall(function()
+                Osi.SetOnStage(entry.id, 0)
+            end)
+            removed[#removed + 1] = entry.id
+        end
+        spawnedCharacters = {}
+        return { removed = removed, count = #removed }
+    end
+
+    if action ~= "spawn" then
+        error("unknown action: " .. tostring(action) .. " (expected spawn, despawn, clear or list)")
+    end
+
+    local templateId = params.template
+    if type(templateId) ~= "string" or templateId == "" then
+        error("params.template is required — a character template UUID, e.g. from bg3_find_template")
+    end
+
+    local template = Ext.Template.GetTemplate(templateId)
+    if template == nil then
+        error("no root template found with id: " .. tostring(templateId))
+    end
+    -- Spawning the wrong type is legal as far as CreateAt is concerned but
+    -- rarely the intent, and an item dropped at world coordinates is hard to
+    -- spot. Name what was passed rather than silently spawning it.
+    if tostring(template.TemplateType) ~= "character" then
+        error(
+            "template " .. tostring(templateId) .. " is a " .. tostring(template.TemplateType)
+                .. ", not a character — pass a character template from bg3_find_template"
+        )
+    end
+
+    -- Explicit x/y/z wins; otherwise the spawn lands `offset` metres from
+    -- `near` (default: the host character), which is what an agent wants nine
+    -- times out of ten and saves a GetPosition round trip.
+    local x, y, z
+    if params.x ~= nil and params.y ~= nil and params.z ~= nil then
+        x, y, z = tonumber(params.x), tonumber(params.y), tonumber(params.z)
+        if x == nil or y == nil or z == nil then
+            error("params.x, params.y and params.z must be numbers")
+        end
+    else
+        local near = params.near
+        if type(near) ~= "string" or near == "" then
+            near = Osi.GetHostCharacter()
+        end
+        if near == nil then
+            error("no host character (is a save loaded?) — pass params.near or explicit x, y and z")
+        end
+        local nx, ny, nz = Osi.GetPosition(near)
+        if nx == nil then
+            error("could not read the position of " .. tostring(near) .. " — pass explicit x, y and z")
+        end
+        local offset = tonumber(params.offset) or 2.0
+        x, y, z = nx + offset, ny, nz
+    end
+
+    local name = params.name
+    if type(name) ~= "string" then
+        name = ""
+    end
+
+    -- CreateAt's arity is fixed at 7 and no shorter form binds — calls with
+    -- fewer arguments fail with "No function named 'CreateAt' exists that can
+    -- be called with N parameters", which never says the wanted count. The
+    -- order is (templateId, x, y, z, temporary, playSpawn, customName); the
+    -- fifth argument is `temporary`, not `playSpawn`. temporary=1 marks the
+    -- entity disposable (how bg3_preview_item spawns its gear); a character
+    -- meant to persist in the save stays 0.
+    local playSpawn = params.playSpawn and 1 or 0
+    local spawned = Osi.CreateAt(template.Id, x, y, z, 0, playSpawn, name)
+    if spawned == nil or spawned == "" then
+        error("Osi.CreateAt returned nothing for template " .. tostring(templateId))
+    end
+
+    spawnedCharacters[#spawnedCharacters + 1] = {
+        id = tostring(spawned),
+        template = tostring(templateId),
+        templateName = tostring(template.Name),
+        x = x,
+        y = y,
+        z = z,
+    }
+
+    return {
+        spawned = tostring(spawned),
+        template = tostring(templateId),
+        templateName = tostring(template.Name),
+        position = { x = x, y = y, z = z },
+        tracked = #spawnedCharacters,
+        note = "the engine finishes populating the entity a beat later; verify with bg3_entity_inspect",
+    }
+end
+
+--- Animation auditioning and idle overriding.
+---
+--- Hard-won facts behind this handler, all probed against the live game:
+---
+--- * Osi.PlayAnimation resolves ONLY the bare AnimationShortName GUID.
+---   Appending the "(name)" suffix — the exact format status AnimationLoop
+---   fields display — turns the call into a silent no-op. So strip it.
+--- * Osi.PlayLoopingAnimation is real but looks dead: every arity from 2-6
+---   fails with "No function named ...", and the true signature is EIGHT
+---   arguments with the animation reference in position 3:
+---       PlayLoopingAnimation(character, "", guid, "", "", "", "", "")
+---   It loops Looping=false animations continuously and holds statue poses
+---   indefinitely. Movement is blocked while one runs; crouching (sneak)
+---   breaks the loop one-way — it does not resume when you stop moving.
+---   End one with Osi.StopAnimation(character, 1) — the second argument is
+---   the animation channel, a number, which is why string forms error with
+---   "Number expected for argument 3". The looping-call signature comes
+---   from the source of the Emotes mod by claravel; the bogus-name
+---   PlayLoopingAnimation that mod uses in one ping handler is NOT a
+---   general cancel — tried it, the loop kept running.
+--- * The status AnimationLoop field (Hold Person's freeze) is ignored on
+---   BOOST-type statuses — a correctly formatted reference played nothing.
+---   It is part of the incapacitation mechanism, not an idle override.
+--- * The persistent idle override that works on any character is a status
+---   with StillAnimationType set (the enum behind "Dazed" etc.), carried by
+---   a status with no Boosts and no RemoveEvents so nothing else rides
+---   along. Still types without art for the race freeze the character
+---   mid-pose (ORTHON_LAUGH on an elf), which list flags where visible.
+--- * Osi.Freeze is a story-event control lock, not an animation hold, and
+---   the Animation resource Offset field silences playback when set — so a
+---   photo-mode pose (a Timing marker inside a parent animation) cannot be
+---   held at an arbitrary frame; loop the parent animation instead.
+---
+--- All of it is session-only: runtime stat edits and applied statuses die
+--- with a VM reset or save reload, which is exactly what an auditioning
+--- tool wants.
+
+--- Active native loops, keyed by character:guid, so stop and clear can end
+--- them with StopAnimation(character, 1).
+local animationLoops = {}
+
+--- The one active carrier-status override: idle (StillAnimationType edit)
+--- and animset (DynamicAnimationTag edit) share a carrier status, so they
+--- are mutually exclusive — the same single-active pattern as item.preview.
+--- Fields: kind ("idle"|"animset"), carrier, character, duration,
+--- restoreStill (string to put back, nil = field was never edited),
+--- restoreTag (string to put back, FALSE = restore to absent — writing ""
+--- is rejected by the stats proxy while nil clears, and nil = never edited).
+local activeOverride = nil
+
+local function clearCarrierOverride()
+    if activeOverride == nil then
+        return nil
+    end
+    local finished = activeOverride
+    pcall(function()
+        Osi.RemoveStatus(finished.character, finished.carrier)
+    end)
+    if finished.restoreStill ~= nil or finished.restoreTag ~= nil then
+        local stat = Ext.Stats.Get(finished.carrier)
+        if stat ~= nil then
+            if finished.restoreStill ~= nil then
+                stat.StillAnimationType = finished.restoreStill
+            end
+            if finished.restoreTag ~= nil then
+                if finished.restoreTag == false then
+                    stat.DynamicAnimationTag = nil
+                else
+                    stat.DynamicAnimationTag = finished.restoreTag
+                end
+            end
+            if type(stat.Sync) == "function" then
+                stat:Sync()
+            end
+        end
+    end
+    activeOverride = nil
+    return { kind = finished.kind, carrier = finished.carrier, character = finished.character }
+end
+
+--- The AnimationShortName GUID is not the animation resource's GUID; the
+--- only link is the name embedded in the GR2 path (…_PM_FlyingKiss_01.GR2).
+--- A full Animation-bank scan costs ~1s, so results (and misses) are cached
+--- per name. Duration is uniform across rig variants for the animations
+--- checked, so the first hit answers for every race.
+local animationDurationCache = {}
+
+local function animationDuration(name)
+    if type(name) ~= "string" or name == "" then
+        return nil
+    end
+    local cached = animationDurationCache[name]
+    if cached ~= nil then
+        return cached or nil -- false marks a prior miss
+    end
+
+    local needle = normalize(name)
+    local found = nil
+    for _, guid in ipairs(Ext.Resource.GetAll("Animation")) do
+        local ok, resource = pcall(function()
+            return Ext.Resource.Get(guid, "Animation")
+        end)
+        if ok and resource ~= nil then
+            local path = tostring(resource.Template) .. " " .. tostring(resource.SourceFile)
+            if string.find(normalize(path), needle, 1, true) ~= nil then
+                local duration = tonumber(resource.Duration)
+                if duration ~= nil and duration > 0 then
+                    found = duration
+                    break
+                end
+            end
+        end
+    end
+    animationDurationCache[name] = found or false
+    return found
+end
+
+--- A GUID passed directly skips the name search, but the name is still worth
+--- having: it is the key into the duration lookup. 8.8k static entries — a
+--- cheap scan compared to the 101k animation bank.
+local function nameForAnimationGuid(guid)
+    local lowered = string.lower(guid)
+    for _, entryGuid in ipairs(Ext.StaticData.GetAll("AnimationShortName")) do
+        local ok, entry = pcall(function()
+            return Ext.StaticData.Get(entryGuid, "AnimationShortName")
+        end)
+        if ok and entry ~= nil and string.lower(tostring(entry.ResourceUUID)) == lowered then
+            return tostring(entry.Name)
+        end
+    end
+    return nil
+end
+
+--- Resolve an animation reference to the bare GUID PlayAnimation wants.
+--- Accepts a GUID, a "GUID(name)" pair (suffix stripped — it breaks the
+--- call), or a name to search in AnimationShortName static data. Returns
+--- guid, name, matches — matches has every candidate when searching by
+--- name, so find and "picked X of N" reporting share one lookup.
+local function resolveAnimation(query)
+    if type(query) ~= "string" or query == "" then
+        error("params.animation is required — an AnimationShortName GUID or name, e.g. from action=find")
+    end
+
+    local guid = string.match(query, "^(%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x)")
+    if guid ~= nil then
+        guid = string.lower(guid)
+        return guid, nameForAnimationGuid(guid), nil
+    end
+
+    local needle = normalize(query)
+    local matches = {}
+    for _, entryGuid in ipairs(Ext.StaticData.GetAll("AnimationShortName")) do
+        local ok, entry = pcall(function()
+            return Ext.StaticData.Get(entryGuid, "AnimationShortName")
+        end)
+        if ok and entry ~= nil then
+            local name = tostring(entry.Name)
+            if string.find(normalize(name), needle, 1, true) ~= nil then
+                matches[#matches + 1] = { guid = tostring(entry.ResourceUUID), name = name }
+            end
+        end
+    end
+    table.sort(matches, function(a, b)
+        return a.name < b.name
+    end)
+
+    if #matches == 0 then
+        error("no AnimationShortName matching: " .. query)
+    end
+    return matches[1].guid, matches[1].name, matches
+end
+
+--- Every StillAnimationType in use, with example statuses and whether a
+--- clean carrier exists — a status with no Boosts and no RemoveEvents, so
+--- the idle override brings nothing but the animation. DRUNK is the proof
+--- that these re-assert after movement; PERFORM_* statuses are not, they
+--- are sessions that movement cancels.
+local function stillAnimationTypes()
+    local types = {}
+    for _, name in ipairs(Ext.Stats.GetStats("StatusData")) do
+        local stat = Ext.Stats.Get(name)
+        local ok, stillType = pcall(function()
+            return tostring(stat.StillAnimationType)
+        end)
+        if ok and stillType ~= nil and stillType ~= "" and stillType ~= "None" then
+            local bucket = types[stillType]
+            if bucket == nil then
+                bucket = { type = stillType, carriers = {}, examples = {} }
+                types[stillType] = bucket
+            end
+            local boosts = tostring(stat.Boosts)
+            local removeCount = 0
+            for _ in pairs(stat.RemoveEvents) do
+                removeCount = removeCount + 1
+            end
+            if boosts == "" and removeCount == 0 and #bucket.carriers < 4 then
+                bucket.carriers[#bucket.carriers + 1] = name
+            elseif #bucket.examples < 4 then
+                bucket.examples[#bucket.examples + 1] = name
+            end
+        end
+    end
+
+    local out = {}
+    for _, bucket in pairs(types) do
+        out[#out + 1] = bucket
+    end
+    table.sort(out, function(a, b)
+        return a.type < b.type
+    end)
+    return out
+end
+
+local function stopAllLoops()
+    local stoppedLoops = 0
+    local cancelled = {}
+    for _, entry in pairs(animationLoops) do
+        stoppedLoops = stoppedLoops + 1
+        -- The cancel is StopAnimation with a numeric second argument — the
+        -- loop channel — NOT the bogus-name PlayLoopingAnimation call, which
+        -- the Emotes mod uses only as a one-off pose interrupt and which left
+        -- a looped kneel running when tried as a general cancel.
+        if cancelled[entry.character] == nil then
+            pcall(function()
+                Osi.StopAnimation(entry.character, 1)
+            end)
+            cancelled[entry.character] = true
+        end
+    end
+    animationLoops = {}
+    return stoppedLoops
+end
+
+local function clearAnimationState()
+    local stoppedLoops = stopAllLoops()
+    local clearedOverride = clearCarrierOverride()
+    return { stoppedLoops = stoppedLoops, overrideCleared = clearedOverride }
+end
+
+--- Every AnimationSetPriority entry — the named locomotion override sets
+--- (Zombie, on_all_fours, Bladesong, crowd sits and staggers, …). A status
+--- whose DynamicAnimationTag holds one of these GUIDs swaps the character's
+--- whole animation set — idle, walk, run — through the same channel RAGE
+--- and Bladesong use, so movement is never blocked. The mechanism and the
+--- carrier recipe (hidden BOOST status, toggleable passive) come from the
+--- On All Fours Toggle mod, which ships no animation data at all: its crawl
+--- set is the base game's own, merely tagged in.
+local function animationSets()
+    local sets = {}
+    for _, g in ipairs(Ext.StaticData.GetAll("AnimationSetPriority")) do
+        local ok, entry = pcall(function()
+            return Ext.StaticData.Get(g, "AnimationSetPriority")
+        end)
+        if ok and entry ~= nil then
+            sets[#sets + 1] = {
+                name = tostring(entry.Name),
+                priority = tonumber(entry.Priority),
+                guid = string.lower(tostring(entry.ResourceUUID)),
+            }
+        end
+    end
+    table.sort(sets, function(a, b)
+        return a.name < b.name
+    end)
+    return sets
+end
+
+--- The cleanest status already carrying a given animation tag: no Boosts
+--- and no RemoveEvents, so the override brings nothing but the animation
+--- set. Returns the status name, or nil when no clean carrier exists and
+--- the caller should edit a carrier itself.
+local function cleanCarrierForTag(guid)
+    local lowered = string.lower(guid)
+    for _, name in ipairs(Ext.Stats.GetStats("StatusData")) do
+        local stat = Ext.Stats.Get(name)
+        local ok, tag = pcall(function()
+            return string.lower(tostring(stat.DynamicAnimationTag))
+        end)
+        if ok and tag == lowered then
+            local boosts = tostring(stat.Boosts)
+            local removeCount = 0
+            for _ in pairs(stat.RemoveEvents) do
+                removeCount = removeCount + 1
+            end
+            if boosts == "" and removeCount == 0 then
+                return name
+            end
+        end
+    end
+    return nil
+end
+
+H["animation"] = function(params)
+    local action = params.action or "list"
+
+    if action == "clear" then
+        return clearAnimationState()
+    end
+
+    if action == "list" then
+        local loops = {}
+        for key, entry in pairs(animationLoops) do
+            loops[#loops + 1] = { key = key, character = entry.character, guid = entry.guid, name = entry.name }
+        end
+        local sets = animationSets()
+        for _, set in ipairs(sets) do
+            set.cleanCarrier = cleanCarrierForTag(set.guid)
+        end
+        return {
+            stillTypes = stillAnimationTypes(),
+            animationSets = sets,
+            activeLoops = loops,
+            activeOverride = activeOverride,
+            defaultCarrier = "ANIM_COWER",
+        }
+    end
+
+    if action == "find" then
+        local guid, name, matches = resolveAnimation(params.query or params.animation)
+        -- One bank scan per distinct name, cached; beyond ten matches the
+        -- scans cost more than the information is worth.
+        if #matches <= 10 then
+            for _, match in ipairs(matches) do
+                match.durationSeconds = animationDuration(match.name)
+            end
+        end
+        return { matched = #matches, animations = matches }
+    end
+
+    local character = params.character
+    if type(character) ~= "string" or character == "" then
+        character = Osi.GetHostCharacter()
+    end
+    if character == nil then
+        error("no host character (is a save loaded?) — pass params.character")
+    end
+
+    if action == "play" then
+        local guid, name = resolveAnimation(params.animation)
+        local ok, err = pcall(function()
+            Osi.PlayAnimation(character, guid, "")
+        end)
+        if not ok then
+            error("PlayAnimation failed: " .. tostring(err))
+        end
+        return { played = guid, name = name, character = character, durationSeconds = animationDuration(name) }
+    end
+
+    if action == "loop" then
+        local guid, name = resolveAnimation(params.animation)
+        local ok, err = pcall(function()
+            Osi.PlayLoopingAnimation(character, "", guid, "", "", "", "", "")
+        end)
+        if not ok then
+            error("PlayLoopingAnimation failed: " .. tostring(err))
+        end
+        local key = tostring(character) .. ":" .. guid
+        animationLoops[key] = { character = character, guid = guid, name = name }
+        return {
+            looping = key,
+            name = name,
+            durationSeconds = animationDuration(name),
+            note = "engine loop: holds statue poses, loops animations continuously. Movement is blocked while it runs — crouching breaks it one-way, or use stop/clear",
+        }
+    end
+
+    if action == "stop" then
+        -- Loops only: stop must not tear down an idle override, which is an
+        -- independent state the user asked for separately.
+        local stopped = stopAllLoops()
+        return { stoppedLoops = stopped }
+    end
+
+    if action == "idle" then
+        local stillType = params.stillType
+        if type(stillType) ~= "string" or stillType == "" then
+            error("params.stillType is required for idle — see action=list for the valid values")
+        end
+
+        local known = nil
+        for _, bucket in ipairs(stillAnimationTypes()) do
+            if string.lower(bucket.type) == string.lower(stillType) then
+                known = bucket.type
+                break
+            end
+        end
+        if known == nil then
+            error("unknown StillAnimationType: " .. stillType .. " — see action=list for the values in use")
+        end
+
+        local carrier = params.carrier
+        if type(carrier) ~= "string" or carrier == "" then
+            carrier = "ANIM_COWER"
+        end
+        local stat = Ext.Stats.Get(carrier)
+        if stat == nil then
+            error("no status named: " .. tostring(carrier))
+        end
+        if tostring(stat.Boosts) ~= "" and params.allowBoosts ~= true then
+            error(
+                "carrier " .. carrier .. " has Boosts (" .. tostring(stat.Boosts)
+                    .. ") — the idle override would carry mechanics with it. Pick a clean carrier from action=list, or pass allowBoosts=true."
+            )
+        end
+
+        -- One override at a time, like item.preview: stacked edits would lose
+        -- the original values the restore depends on.
+        if activeOverride ~= nil then
+            clearCarrierOverride()
+        end
+
+        local duration = tonumber(params.duration) or 600.0
+        local originalStill = tostring(stat.StillAnimationType)
+        stat.StillAnimationType = known
+        if type(stat.Sync) == "function" then
+            stat:Sync()
+        end
+
+        pcall(function()
+            Osi.RemoveStatus(character, carrier)
+        end)
+        local ok, err = pcall(function()
+            Osi.ApplyStatus(character, carrier, duration, 1, character)
+        end)
+        if not ok then
+            stat.StillAnimationType = originalStill
+            if type(stat.Sync) == "function" then
+                stat:Sync()
+            end
+            error("ApplyStatus failed: " .. tostring(err))
+        end
+
+        activeOverride = {
+            kind = "idle",
+            carrier = carrier,
+            character = tostring(character),
+            duration = duration,
+            restoreStill = originalStill,
+            restoreTag = nil,
+        }
+        return {
+            idle = known,
+            carrier = carrier,
+            character = tostring(character),
+            duration = duration,
+            note = "re-asserts whenever the character stands still; if the race has no art for this still type the character freezes mid-pose instead — clear and pick another",
+        }
+    end
+
+    if action == "animset" then
+        local setName = params.set
+        if type(setName) ~= "string" or setName == "" then
+            error("params.set is required for animset — an AnimationSetPriority name, e.g. \"Zombie\"; see action=list")
+        end
+
+        local needle = normalize(setName)
+        local chosen = nil
+        for _, set in ipairs(animationSets()) do
+            if normalize(set.name) == needle then
+                chosen = set
+                break
+            elseif chosen == nil and string.find(normalize(set.name), needle, 1, true) ~= nil then
+                chosen = set
+            end
+        end
+        if chosen == nil then
+            error("no animation set matching: " .. setName .. " — see action=list for the valid names")
+        end
+
+        if activeOverride ~= nil then
+            clearCarrierOverride()
+        end
+
+        local duration = tonumber(params.duration) or 600.0
+        local carrier = cleanCarrierForTag(chosen.guid)
+        local edited = false
+        local restoreTag, restoreStill = nil, nil
+
+        if carrier == nil then
+            -- No clean status already carries this tag: edit one in. The
+            -- carrier's StillAnimationType is neutralised too — a lingering
+            -- still type would fight the override set for the idle slot.
+            carrier = params.carrier
+            if type(carrier) ~= "string" or carrier == "" then
+                carrier = "ANIM_COWER"
+            end
+            local stat = Ext.Stats.Get(carrier)
+            if stat == nil then
+                error("no status named: " .. tostring(carrier))
+            end
+            if tostring(stat.Boosts) ~= "" and params.allowBoosts ~= true then
+                error(
+                    "carrier " .. carrier .. " has Boosts (" .. tostring(stat.Boosts)
+                        .. ") — the animset override would carry mechanics with it. Pick a clean carrier, or pass allowBoosts=true."
+                )
+            end
+            local rawTag = stat.DynamicAnimationTag
+            -- An absent GUID field does not read as Lua nil: the stats proxy
+            -- returns a sentinel userdata whose tostring is "nil". Treat that
+            -- (and empty/zero GUID) as absent; false marks "restore to
+            -- absent" because the proxy rejects "" but accepts assigning nil.
+            local tagString = tostring(rawTag)
+            local tagAbsent = rawTag == nil
+                or tagString == "nil"
+                or tagString == ""
+                or tagString == "00000000-0000-0000-0000-000000000000"
+            -- `tagAbsent and false or tagString` can never yield false —
+            -- false is falsy, so the or-chain falls through. Assign plainly.
+            if tagAbsent then
+                restoreTag = false
+            else
+                restoreTag = tagString
+            end
+            restoreStill = tostring(stat.StillAnimationType)
+            stat.DynamicAnimationTag = chosen.guid
+            stat.StillAnimationType = "None"
+            if type(stat.Sync) == "function" then
+                stat:Sync()
+            end
+            edited = true
+        end
+
+        pcall(function()
+            Osi.RemoveStatus(character, carrier)
+        end)
+        local ok, err = pcall(function()
+            Osi.ApplyStatus(character, carrier, duration, 1, character)
+        end)
+        if not ok then
+            if edited then
+                local stat = Ext.Stats.Get(carrier)
+                if restoreTag == false then
+                    stat.DynamicAnimationTag = nil
+                else
+                    stat.DynamicAnimationTag = restoreTag
+                end
+                stat.StillAnimationType = restoreStill
+                if type(stat.Sync) == "function" then
+                    stat:Sync()
+                end
+            end
+            error("ApplyStatus failed: " .. tostring(err))
+        end
+
+        activeOverride = {
+            kind = "animset",
+            carrier = carrier,
+            character = tostring(character),
+            duration = duration,
+            restoreStill = restoreStill,
+            restoreTag = restoreTag,
+        }
+        return {
+            animset = chosen.name,
+            priority = chosen.priority,
+            carrier = carrier,
+            carrierEdited = edited,
+            character = tostring(character),
+            duration = duration,
+            note = "locomotion override: idle, walk and run all come from the set while the status lasts, with normal movement — no crouch tricks",
+        }
+    end
+
+    error("unknown action: " .. tostring(action) .. " (expected find, play, loop, stop, idle, animset, clear or list)")
+end
+
 H["ping"] = function()
     return {
         pong = true,
@@ -1444,7 +2184,143 @@ H["capabilities"] = function()
     return Bridge.capabilities
 end
 
-H["eval"] = function(params)
+--- The environment eval chunks run in ---------------------------------------
+--
+-- Probed against the live game: chunks from SE's one-arg load() land in the
+-- SHARED global table (_ENV == _G inside the chunk; a global set in one eval
+-- is visible in the next; bridge-mod globals like BG3AgentBridge are not
+-- visible). The handler's own `_G` is the bridge mod's PRIVATE global table —
+-- a different table — so patching print from the handler side never reached
+-- the chunk (first attempt captured nothing). SE's load() takes an
+-- environment table as its second argument, which settles this cleanly: each
+-- eval compiles the chunk with a per-call environment that chains reads AND
+-- writes to the shared globals (cross-eval state keeps working), with print
+-- and the mod context shadowed per call. No global patching, nothing to
+-- restore, no leak when a call fails.
+
+local function sharedGlobals()
+    if Bridge.evalSharedGlobals == nil then
+        local probe = Bridge.compile("return _G")
+        if probe ~= nil then
+            local ok, g = pcall(probe)
+            if ok and type(g) == "table" then
+                Bridge.evalSharedGlobals = g
+            end
+        end
+    end
+    return Bridge.evalSharedGlobals
+end
+
+local function recordPrint(prints, ...)
+    local parts = {}
+    for i = 1, select("#", ...) do
+        parts[i] = tostring((select(i, ...)))
+    end
+    prints[#prints + 1] = table.concat(parts, " ")
+end
+
+--- Build the per-call environment for an eval chunk. Raises when modContext
+--- names a mod that is not loaded or has no PersistentVars — before anything
+--- is patched, so a failure leaves nothing to clean up.
+local function buildEvalEnv(prints, modFolder)
+    local shared = sharedGlobals()
+    if shared == nil then
+        error("could not discover the shared global table for eval")
+    end
+
+    local env = {}
+    local realPrint = rawget(shared, "print")
+    if type(realPrint) == "function" then
+        env.print = function(...)
+            recordPrint(prints, ...)
+            return realPrint(...)
+        end
+    end
+
+    -- SE scopes PersistentVars per mod and the bridge mod has none, which made
+    -- a bare `PersistentVars` reference in eval a nil-index error. Shadowing
+    -- the target mod's table into the chunk env makes it just work. Mods is
+    -- resolved through the shared globals: the handler's own `Mods` is not
+    -- guaranteed to be the table the chunk sees (same trap as Ext.Utils).
+    if modFolder ~= nil and modFolder ~= "" then
+        local mods = type(shared.Mods) == "table" and shared.Mods or nil
+        local mod = mods ~= nil and mods[modFolder] or nil
+        if mod == nil then
+            error(
+                'no loaded mod with folder name "'
+                    .. tostring(modFolder)
+                    .. '" — check bg3_list_mods for the folder (directory) name, not the display name'
+            )
+        end
+        if type(mod.PersistentVars) ~= "table" then
+            error('mod "' .. tostring(modFolder) .. '" has no PersistentVars table in this context')
+        end
+        env.PersistentVars = mod.PersistentVars
+        env.ModuleUUID = mod.ModuleUUID
+    end
+
+    return setmetatable(env, { __index = shared, __newindex = shared })
+end
+
+--- Ext.Utils.Print is a shared table field the chunk reaches through Ext, so
+--- shadowing it in the eval env does nothing — the field itself is wrapped for
+--- the duration of the call (plus any capture window), forwarding to the real
+--- one. Restore is unconditional on every exit path.
+--- Ext.Utils.Print is reached through the Ext table of the chunk's
+--- environment — which is NOT the table the handler's `Ext` resolves to
+--- (probed: a handler-side write "took" but chunk-side calls were unaffected;
+--- SE gives the bridge mod its own Ext). Patch through the shared globals the
+--- chunk actually reads. The wrapper forwards to the real Print, so log
+--- behaviour is unchanged, and restore runs on every exit path.
+local function installUtilsPrintCapture(prints, shared)
+    local utils = type(shared) == "table" and type(shared.Ext) == "table" and shared.Ext.Utils or nil
+    if type(utils) ~= "table" or type(utils.Print) ~= "function" then
+        return function() end
+    end
+    local real = utils.Print
+    local active = true
+    utils.Print = function(...)
+        recordPrint(prints, ...)
+        return real(...)
+    end
+    return function()
+        if active then
+            active = false
+            utils.Print = real
+        end
+    end
+end
+
+--- Compile a pollUntil predicate. An expression ("entity.Health.Hp == 0") is
+--- the common case; statements work too, since the expression form is tried
+--- first and the raw form second. Shares the eval chunk's environment.
+local function compilePredicate(source, env)
+    local chunk = Bridge.compile("return " .. source, env)
+    if chunk == nil then
+        chunk = Bridge.compile(source, env)
+    end
+    return chunk
+end
+
+local function monotonicMs()
+    if Ext.Timer ~= nil and type(Ext.Timer.MonotonicTime) == "function" then
+        local ok, value = pcall(Ext.Timer.MonotonicTime)
+        if ok and type(value) == "number" then
+            return value
+        end
+    end
+    return nil
+end
+
+local function clampNumber(value, fallback, low, high)
+    local n = tonumber(value)
+    if n == nil then
+        return fallback
+    end
+    return math.min(math.max(n, low), high)
+end
+
+H["eval"] = function(params, seq)
     if not Bridge.capabilities.eval then
         error("eval is unavailable: this Script Extender build does not expose load() to mod scripts")
     end
@@ -1454,18 +2330,132 @@ H["eval"] = function(params)
         error("params.code must be a non-empty string")
     end
 
-    local chunk, compileError = Bridge.compile(code)
+    local captureMs = clampNumber(params.captureMs, 0, 0, 30000)
+    local hasPoll = type(params.pollUntil) == "string" and params.pollUntil ~= ""
+    local intervalMs = clampNumber(params.intervalMs, 250, 50, 10000)
+    local timeoutMs = clampNumber(params.timeoutMs, 5000, 100, 60000)
+
+    -- The per-call environment shadows print (capture) and, when modContext is
+    -- given, PersistentVars/ModuleUUID. buildEvalEnv raises on an unknown mod
+    -- before anything global is touched, so there is nothing to restore.
+    local prints = {}
+    local env = buildEvalEnv(prints, params.modContext)
+
+    local chunk, compileError = Bridge.compile(code, env)
     if chunk == nil then
         error("compile error: " .. tostring(compileError))
     end
 
-    local returned = table.pack(chunk())
-    local values = {}
-    for i = 1, returned.n do
-        values[i] = Bridge.describe(returned[i])
+    local predicate = nil
+    if hasPoll then
+        predicate = compilePredicate(params.pollUntil, env)
+        if predicate == nil then
+            error("pollUntil compile error: not valid Lua as an expression or a chunk")
+        end
     end
 
-    return { count = returned.n, values = values }
+    -- Ext.Utils.Print is reached through the shared Ext table, so the env
+    -- cannot shadow it; the field itself is wrapped until the call settles.
+    local restoreUtilsPrint = installUtilsPrintCapture(prints, sharedGlobals())
+
+    local returned = table.pack(pcall(chunk))
+    local mainOk = returned[1]
+    local values = {}
+    if mainOk then
+        for i = 2, returned.n do
+            values[i - 1] = Bridge.describe(returned[i])
+        end
+    end
+
+    local result = { count = #values, values = values, prints = prints }
+
+    -- The chunk itself failed: restore and let dispatch report the error.
+    -- Polling a state that never got set up would only hide the real problem.
+    if not mainOk then
+        restoreUtilsPrint()
+        error(tostring(returned[2]))
+    end
+
+    -- No deferred work requested: answer synchronously, as before.
+    if not hasPoll and captureMs <= 0 then
+        restoreUtilsPrint()
+        return result
+    end
+
+    -- Deferred path. The response is written by a timer once the predicate is
+    -- satisfied, the window closes, or the wait times out — print capture and
+    -- the mod context stay live until then (the env is held by the timer
+    -- closures), so timers the chunk scheduled are captured too.
+    local settled = false
+    local attempts = 0
+    local started = monotonicMs()
+    local function elapsedMs()
+        local now = monotonicMs()
+        if started ~= nil and now ~= nil then
+            return math.max(0, now - started)
+        end
+        return attempts * intervalMs
+    end
+
+    local function settle(polled)
+        if settled then
+            return
+        end
+        settled = true
+        restoreUtilsPrint()
+        if polled ~= nil then
+            result.polled = polled
+        end
+        Bridge.Respond(seq, true, result)
+    end
+
+    local function pollTick()
+        if settled then
+            return
+        end
+        attempts = attempts + 1
+
+        if predicate ~= nil then
+            local ok, value = pcall(predicate)
+            if not ok then
+                settled = true
+                restoreUtilsPrint()
+                Bridge.Respond(seq, false, "pollUntil raised after " .. attempts .. " attempt(s): " .. tostring(value))
+                return
+            end
+            if value then
+                settle({
+                    satisfied = true,
+                    attempts = attempts,
+                    elapsedMs = elapsedMs(),
+                    value = Bridge.describe(value),
+                })
+                return
+            end
+        end
+
+        local deadline = hasPoll and timeoutMs or captureMs
+        if elapsedMs() >= deadline then
+            if hasPoll then
+                settle({ satisfied = false, attempts = attempts, elapsedMs = elapsedMs() })
+            else
+                settle(nil)
+            end
+            return
+        end
+
+        Ext.Timer.WaitFor(intervalMs, pollTick)
+    end
+
+    if hasPoll then
+        -- First check is immediate: the chunk often arranges the end state
+        -- itself, and waiting a full interval would just add latency.
+        pollTick()
+    else
+        Ext.Timer.WaitFor(captureMs, pollTick)
+    end
+
+    return Bridge.DEFERRED
 end
 
 H["entity.get"] = function(params)
@@ -1503,6 +2493,148 @@ H["entity.get"] = function(params)
     end
 
     return { id = tostring(id), components = entity:GetAllComponentNames() }
+end
+
+--- Schema introspection ------------------------------------------------------
+--
+-- The questions that otherwise cost a runtime error each: "is it .Name or
+-- .SourceFile?", ".TempHp or .TemporaryHp?", "why is StatusManager not a
+-- component?". SE exposes no standalone type registry to mod scripts, so the
+-- schema is read from a LIVE instance: stringify one level of the object and
+-- report each field's name and value type. Ext.Json's depth limit raises
+-- rather than truncates, so the stringify retries with a growing limit before
+-- giving up.
+
+--- Flatten one level of a live object into {name, type, preview} rows.
+--- Uses the response encoder's option set: without IterateUserdata the
+--- stringifier rejects component userdata outright ("unsupported type").
+local function fieldRows(value)
+    local lastError = nil
+    for _, depth in ipairs({ 3, 6, 10 }) do
+        local ok, encoded = pcall(Ext.Json.Stringify, value, {
+            StringifyInternalTypes = true,
+            IterateUserdata = true,
+            AvoidRecursion = true,
+            MaxDepth = depth,
+        })
+        if ok and type(encoded) == "string" then
+            local parsedOk, parsed = pcall(Ext.Json.Parse, encoded)
+            if parsedOk and type(parsed) == "table" then
+                local rows = {}
+                for name, field in pairs(parsed) do
+                    local preview = nil
+                    if type(field) == "string" then
+                        preview = #field > 120 and string.sub(field, 1, 120) .. "…" or field
+                    elseif type(field) == "number" or type(field) == "boolean" then
+                        preview = tostring(field)
+                    end
+                    rows[#rows + 1] = { name = tostring(name), type = type(field), preview = preview }
+                end
+                table.sort(rows, function(a, b)
+                    return a.name < b.name
+                end)
+                return rows
+            end
+        else
+            lastError = encoded
+        end
+    end
+    error("could not read fields (object too deep even at limit 10): " .. tostring(lastError))
+end
+
+H["schema"] = function(params)
+    local action = params.action or "components"
+
+    if action == "components" then
+        -- The union of both listings, each row marked with whether property
+        -- access actually works. GetAllComponents() and GetAllComponentNames()
+        -- DISAGREE on some entities (AvatarComponent appeared in the names
+        -- list only) — and a listed name is no guarantee the indexer accepts
+        -- it (e.StatusManager raises; the reachable one is e.StatusContainer).
+        local id = params.entity
+        if type(id) ~= "string" or id == "" then
+            error("params.entity is required for action=components — an entity UUID")
+        end
+        local entity = Ext.Entity.Get(id)
+        if entity == nil then
+            error("no entity found for id: " .. tostring(id))
+        end
+
+        local rows, seen = {}, {}
+        local function add(name, source)
+            if name == nil or name == "" then
+                return
+            end
+            name = tostring(name)
+            if seen[name] ~= nil then
+                seen[name].listedBy = seen[name].listedBy .. "+" .. source
+                return
+            end
+            local accessible = Bridge.resolveComponent(entity, name) ~= nil
+            local row = { name = name, accessible = accessible, listedBy = source }
+            seen[name] = row
+            rows[#rows + 1] = row
+        end
+
+        pcall(function()
+            for _, name in ipairs(entity:GetAllComponentNames()) do
+                add(name, "names")
+            end
+        end)
+        pcall(function()
+            local all = entity:GetAllComponents()
+            if type(all) == "table" then
+                for name in pairs(all) do
+                    add(name, "components")
+                end
+            end
+        end)
+
+        table.sort(rows, function(a, b)
+            return a.name < b.name
+        end)
+        return { entity = id, count = #rows, components = rows }
+    end
+
+    if action == "fields" then
+        local id = params.entity
+        local componentName = params.component
+        if type(id) ~= "string" or id == "" or type(componentName) ~= "string" or componentName == "" then
+            error("action=fields needs params.entity (UUID) and params.component (e.g. \"Health\" or \"eoc::HealthComponent\")")
+        end
+        local entity = Ext.Entity.Get(id)
+        if entity == nil then
+            error("no entity found for id: " .. tostring(id))
+        end
+        local component, resolved = Bridge.resolveComponent(entity, componentName)
+        if component == nil then
+            error(
+                "entity has no reachable component named: " .. tostring(componentName)
+                    .. " (tried " .. table.concat(Bridge.componentAliases(componentName), ", ") .. ")"
+            )
+        end
+        return { entity = id, component = resolved, fields = fieldRows(component) }
+    end
+
+    if action == "resource" then
+        -- Field schema of a resource bank, from a loaded entry. Loaded-only:
+        -- Ext.Resource sees what the game has loaded, not what paks define.
+        local bank = params.type
+        if type(bank) ~= "string" or bank == "" then
+            error('params.type is required for action=resource — a resource bank, e.g. "Animation", "Visual"')
+        end
+        local all = Ext.Resource.GetAll(bank)
+        if type(all) ~= "table" or #all == 0 then
+            error('no loaded resources in bank "' .. tostring(bank) .. '" — banks only hold what the game has loaded')
+        end
+        local resource = Ext.Resource.Get(all[1], bank)
+        if resource == nil then
+            error("could not fetch a sample resource from bank: " .. tostring(bank))
+        end
+        return { type = bank, sampled = tostring(all[1]), fields = fieldRows(resource) }
+    end
+
+    error("unknown action: " .. tostring(action) .. " (expected components, fields or resource)")
 end
 
 H["stats.get"] = function(params)
