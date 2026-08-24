@@ -4,6 +4,8 @@ An MCP server that gives an AI coding agent a **live feedback loop into a runnin
 
 Editing BG3 mods with an agent today is blind: it writes Lua, you launch the game, you read the error, you paste it back. This closes that loop — the agent can reload scripts, inspect live entities, read stats, and tail the Script Extender log itself.
 
+New to this? Jump to **[Quick start](#quick-start)** — it's the whole path from download to working in four steps.
+
 Why the Script Extender and not Larian's Toolkit? The Toolkit (`Glasses.exe`) has no plugin API, no headless mode, and no IPC. The Script Extender is where BG3 exposes live reflection.
 
 **What this is not:**
@@ -12,7 +14,46 @@ Why the Script Extender and not Larian's Toolkit? The Toolkit (`Glasses.exe`) ha
 - Not a Toolkit automation layer.
 - Not a source editor. Everything it changes is session-only; your agent already has file tools for the source.
 
+## Quick start
+
+This is the whole path from download to working. Each step links to more detail below.
+
+**You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+). Nothing else to install — the download is a single `.exe`.
+
+1. **Download and extract** `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
+2. **Install the mod** — with BG3 **closed** — by running in that folder:
+   ```
+   .\bg3-bridge install
+   ```
+3. **Connect your AI agent**, then fully restart the agent app:
+   ```
+   .\bg3-bridge configure --write claude-desktop
+   ```
+   Swap `claude-desktop` for `cursor`, `kimi`, `claude-code`, or `project`. Full list and manual setup: [Connecting your AI agent](#connecting-your-ai-agent).
+4. **Check it works.** Launch BG3, load a save, then run:
+   ```
+   .\bg3-bridge check
+   ```
+   Success means the bridge is talking to your game. If anything fails, see [Troubleshooting](#troubleshooting).
+
+**Caution:** this lets your AI agent run code inside your live game. That is the point, but only install it while you are actively modding, and [uninstall when you are done](#read-this-before-installing).
+
+### First things to ask your agent
+
+You never call tools yourself — talk to your agent in plain English and it picks the right one:
+
+- "Is the BG3 bridge connected?"
+- "Find a Flaming Fist guard template and spawn one next to me, then clear it afterwards."
+- "What status creates that green ghostly look? Preview it on my character."
+- "Reload my mod's Lua and tell me whether it loaded cleanly."
+- "Set my character to 1 HP so I can test my low-health passive."
+- "Drop my character to 0 HP and show me which events fire."
+
+See the full [Tools](#tools) table for everything it can do.
+
 ## How it works
+
+*Optional background — skip to [Install](#install) if you just want to use it.*
 
 The Script Extender has **no networking** — SE mods cannot open sockets. It does have `Ext.IO.SaveFile` / `Ext.IO.LoadFile` and a per-tick event, so the transport is a file mailbox in the Script Extender data directory:
 
@@ -142,7 +183,7 @@ Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character 
 
 </details>
 
-**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 22 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
+**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 26 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
 
 ## Building your own mods
 
@@ -171,11 +212,15 @@ The `examples/` directory has three worked mods — a spell, an item, and a stat
 | `bg3_preview_item` | Temporarily wear an item to see how it looks, then restore |
 | `bg3_preview_status` | Apply a status to see its effect, then clear it |
 | `bg3_spawn_character` | Spawn an NPC from a character template, then despawn or clear |
+| `bg3_resolve_character` | Resolve any UUID/name form to a stable identity (bare uuid, prefixed, Tav/avatar, HP, dead/downed), or list the party |
+| `bg3_life` | Damage, heal, setHp, fullHeal, kill, down or resurrect a character, reporting before/after and faithfulness caveats |
 | `bg3_animation` | Audition any animation, swap locomotion sets (idle+walk+run), or override the idle |
 | `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
 | `bg3_capture_sounds` | Record which sound events the game actually fires — "what sound was that?" |
 | `bg3_eval` | Run a Lua chunk in the live game — captures prints, can borrow a mod's context, and can poll until a condition holds |
-| `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` |
+| `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` — waits for the fresh handshake + ping and reports the outcome by default |
+| `bg3_osiris_functions` | List the Osi function table by name filter, or probe specific names for existence |
+| `bg3_vfs_probe` | Read a path through the game VFS and report the byte length served — tells pak vs loose apart |
 | `bg3_entity_inspect` | List an entity's components, or dump one by name |
 | `bg3_schema` | Field names and types of a component or resource, and which components on an entity are actually reachable |
 | `bg3_stats_get` | Read a stat entry or a single attribute |
@@ -361,6 +406,43 @@ bg3_animation action=clear                           restore everything
 
 Everything `bg3_animation` changes is session-only by design: runtime stat edits and applied statuses die with a `bg3_reload` or save reload, and `action=clear` restores the carrier's original `StillAnimationType` immediately.
 
+## Character identity, and testing death and downing
+
+BG3 character identity is a minefield, so resolve it rather than guess. `Osi.GetHostCharacter()` returns a **bare** UUID and follows *control* — it moves to a companion when the avatar is downed and does not revert on resurrect — while Osiris events deliver **prefixed** template-name forms (`Elves_Female_High_Player_<uuid>`) that fail bare-string equality. `bg3_resolve_character` takes any of those forms (or a display name) and returns the bare uuid, the prefixed form, the display name, whether the entity is the player-created Tav (the `AvatarComponent`, stable across control and death), whether it is host-controlled right now, HP, and dead/downed state:
+
+```
+bg3_resolve_character                       resolve the host character
+bg3_resolve_character action=party          every party member with life state
+bg3_resolve_character id="Shadowheart"      resolve by display name
+```
+
+`bg3_life` drives health and life state for testing. `damage`/`heal`/`setHp`/`fullHeal`/`kill` set HP via `Osi.SetHitpoints` (verified present against the live game — enumerate with `bg3_osiris_functions query="hitpoint"`), falling back to a `HealthComponent.Hp` write + replicate when it is unavailable, and every action reports before/after HP plus dead/downed state after a short settle window (so an ineffective queued call surfaces as `after != target`, not a false success). Setting HP is still **not** a damage/attack event — no attacker, damage type or hit reaction — so combat and death triggers can differ from a real hit (a raw write to 0 in particular can leave a "limbo death" inside a suppressed a scene-manager mod scene). Each mutating action therefore carries a `caveat` and a `method`, and you should validate real death logic with an in-game hit. `down` applies the DOWNED status; `resurrect` uses `Osi.Resurrect` when present:
+
+```
+bg3_life                                     read HP + dead/downed for the host
+bg3_life action=kill character=<uuid>        zero HP, then report the settled state
+bg3_life action=down character=<uuid>        apply DOWNED
+```
+
+## Confirming a reload, and pak vs loose
+
+`bg3_reload` now waits by default and confirms the reload without depending on logging: it records the handshake file's timestamp, triggers `Ext.Debug.Reset()`, waits for `Bridge.Start` to rewrite that handshake (the definitive "VM rebooted" signal), then pings the fresh VM and returns `{reloaded, rebooted, responsive, durationMs, capabilities}`. A Lua syntax error in a reloaded script stops `Bridge.Start`, so the handshake never advances and this correctly reports `reloaded:false`. Pass `wait=false` for fire-and-forget.
+
+When a `.pak` and loose files both exist, the game binds the module to its **pak** — "loose overrides pak" does *not* hold, and a new loose file is invisible until restart because the VFS loose index is built at boot (Lua hot-reload is the exception). `bg3_vfs_probe` reads a path through the game VFS and reports the byte length served, the decisive tell for which physical copy is live:
+
+```
+bg3_vfs_probe path="Mods/BG3AgentBridge/ScriptExtender/Lua/BootstrapServer.lua"
+```
+
+## Discovering Osiris functions
+
+Osiris function names are guessable and wrong as often as not. `bg3_osiris_functions` enumerates the live `Osi` table (`action=list`, ~1303 names on SE v32) filtered by substring, and probes specific names for existence (`action=probe`) — SE's own error text distinguishes a known name at the wrong arity from one that does not exist. It confirms existence, not the correct arity; only a real call settles a signature (`bg3_eval` makes that cheap):
+
+```
+bg3_osiris_functions query="damage"                          every Osi name containing "damage"
+bg3_osiris_functions action=probe names=["ApplyDamage","Die","Resurrect"]
+```
+
 ## A note on RequiredVersion
 
 `ScriptExtender/Config.json` declares `"RequiredVersion": 32`, and that number does more than gate loading. From the Script Extender docs:
@@ -387,6 +469,8 @@ Checking whether an `Osi` function exists needs `type(Osi.X) ~= "nil"` — entri
 
 **Some objects cannot be serialized.** Large stat entries follow an inheritance chain deep enough to exceed the JSON recursion limit, and that limit *raises* rather than truncating — a lower `depth` turns a large result into a hard error. `bg3_stats_get` on `Projectile_MagicMissile` fails this way; a single `attribute` from the same entry returns instantly. Prefer `attribute` and `component` over whole-object dumps.
 
+**Pak-defined resources that have not loaded cannot be enumerated.** `Ext.Resource.GetAll`/`Get` see only resources the game has already loaded, and SE exposes no force-load and no reader for pak resource *definitions*, so `bg3_find_resource` is loaded-only by necessity. Templates and static data are the exception — those banks are fully enumerable, so `bg3_find_template` and `bg3_find_static_data` reach pak-defined entries.
+
 **Round trips cost about a second.** The mod polls every 30 ticks; one poll already costs SE 7-9ms, flagged as a slow event. Polling faster trades frame time for latency agents do not need.
 
 **Three tiers of change, only one of which is fast.**
@@ -406,6 +490,18 @@ Reloading a *save* applies none of these — it re-reads the save, not the modul
 **The loop is slower than Unity's.** The game boots in about a minute and needs a loaded save — keep one instance alive and iterate against it. `client` only answers once a save is loaded; `server` is the right default for almost everything.
 
 **Script Extender's API moves with game patches.** Every capability is probed at runtime rather than assumed, but a large enough patch will still need updates here.
+
+## Troubleshooting
+
+| Symptom | Fix |
+|---|---|
+| Agent lists no `bg3_*` tools | The config was not picked up. Re-run `.\bg3-bridge configure --write <client>`, then **fully restart** the agent app — almost none reload config live. The client's server list should show `bg3-agent-bridge` with 26 `bg3_*` tools. |
+| `bg3_bridge_status` says both contexts offline | BG3 is not running, or no save is loaded. Launch the game and load a save — the bridge only answers in-game, and the `client` context in particular responds only after a save loads. |
+| `.\bg3-bridge install` finds no game / fails | Close BG3 first (it rewrites `modsettings.lsx` from memory on exit). If your install is not found, set `BG3_GAME_DIR` to your Baldur's Gate 3 folder and re-run. |
+| Installed, but the game ignores the mod | If a packed `Mods\...pak` for it also exists, the game serves the pak and ignores loose files — remove the pak. Make sure "BG3 Agent Bridge" is enabled in your mod manager / load order. `bg3_vfs_probe` shows which copy is live. |
+| Edited Lua, but nothing changed | Ask the agent to run `bg3_reload` (loose Lua hot-reloads). Packed data — stats, templates, textures — needs a full game restart, not a reload. |
+| Config path "breaks the file" | Use forward slashes `/` or escaped `\\` in JSON paths; a single `\` is an escape character. `configure --write` handles this for you. |
+| Done modding | `.\bg3-bridge install --uninstall`, then remove the server from your agent's MCP config. |
 
 ## Legal
 
