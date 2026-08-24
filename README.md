@@ -1,24 +1,23 @@
 # BG3 Agent Bridge
 
-An MCP server that gives an AI coding agent a **live feedback loop into a running Baldur's Gate 3 session**, through the [Script Extender](https://github.com/Norbyte/bg3se).
+An MCP server that gives whichever Coding AI you use (Claude Code, Codex, Kimi Code, etc.) a **live feedback loop into a running Baldur's Gate 3 session**, through the [Script Extender](https://github.com/Norbyte/bg3se).
 
-Editing BG3 mods with an agent today is blind: it writes Lua, you launch the game, you read the error, you paste it back. This closes that loop — the agent can reload scripts, inspect live entities, read stats, and tail the Script Extender log itself.
+I've done most of my BG3 modding with the help of AI. The tedious nature writing code, launching the game, testing the code, pasting errors back into the AI, relaunching the game with the fixes, and so on is what this MCP server aims to fix. With this active, your AI can actually see the events and logs from your running game. It can reload scripts to test them without restarting the game (or even a needing to reload a save), inspect live entities, read stats, and manipulate the game (spawning NPCs, casting spells, most everything you as a player can do and more).
 
-New to this? Jump to **[Quick start](#quick-start)** — it's the whole path from download to working in four steps.
+Go to **[Quick start](#quick-start)** to get started, make sure you set up both the mod side and the server side.
 
-Why the Script Extender and not Larian's Toolkit? The Toolkit (`Glasses.exe`) has no plugin API, no headless mode, and no IPC. The Script Extender is where BG3 exposes live reflection.
+I wanted to let my AI see into Larian's Toolkit, but the Toolkit has no plugin API, no headless mode, and no IPC. Nordbyte's Script Extender makes this bridge possible with the game itself.
 
 **What this is not:**
 
-- Not a replacement for [BG3 Modders Multitool](https://baldurs-gate-3.thunderstore.io/package/ShinyHobo/BG3_Modders_Multitool/), which unpacks, indexes, and searches game files. This is the runtime half, not the static-file half.
+- Not a replacement for [BG3 Modders Multitool](https://baldurs-gate-3.thunderstore.io/package/ShinyHobo/BG3_Modders_Multitool/), which is sadly been hidden on github. Forunately the core piece of multitool is still included in [Nordbyte's LSLib](https://github.com/Norbyte/lslib/), which you can let your AI agent know about to help you pack your mod when it's ready.
 - Not a Toolkit automation layer.
-- Not a source editor. Everything it changes is session-only; your agent already has file tools for the source.
+- Not a one-step tool. Don't expect to ask you AI to make you an awesome BG3 mod (make no mistakes) and expect it do it all for you.
+- Not a visual modding tool. The agent can't see the actual game visuals. I've had some success swapping icons and other visual elements, but you (the human) need to play an active role in confirming the visuals and describing what you see.
 
 ## Quick start
 
-This is the whole path from download to working. Each step links to more detail below.
-
-**You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+). Nothing else to install — the download is a single `.exe`.
+**You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+).
 
 1. **Download and extract** `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
 2. **Install the mod** — with BG3 **closed** — by running in that folder:
