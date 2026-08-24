@@ -2,7 +2,7 @@
 
 Notable changes to the bridge, newest first. Earlier history is in the git log; tracking starts with the first public release.
 
-## [0.2.0] — Unreleased
+## [0.3.0] — 2026-08-24
 
 First public release. Versions below the entries are commit dates, not separate releases.
 
@@ -49,7 +49,7 @@ First public release. Versions below the entries are commit dates, not separate 
 - Direct-run guards: inside a Bun-compiled exe every module's `import.meta.url` is the exe's own URL, which made each CLI module auto-run on import. Guards now return false in exe mode; the dispatcher is the only entry.
 - Bridge error classes carry explicit `name`s; minification had mangled `constructor.name` into noise in diagnostics.
 
-### Added — earlier in 0.2.0
+### Added — earliest work
 
 - `bg3_find_stat` with display-name search by default, static data search, effect reverse lookup, status and item previews, fuzzy template search, sound capture and auditioning.
 - Dev installer that works without a dev toolchain; generated MCP config block instead of hand-typed paths; client config writer with `--write`/`--path`.

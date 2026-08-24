@@ -19,7 +19,7 @@ I wanted to let my AI see into Larian's Toolkit, but the Toolkit has no plugin A
 
 **You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+).
 
-1. **Download and extract** `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
+1. **Download and extract** `bg3-agent-bridge-v0.3.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
 2. **Close Baldur's Gate 3, then double-click `bg3-bridge.exe`.** It installs the companion mod and prints a short MCP config block — copy it.
 3. **Paste that block to your AI agent** and ask it to add the server to its MCP config, then restart the agent. Launch BG3, load a save, and ask *"Is the BG3 bridge connected?"* — the agent takes it from there.
 
@@ -102,7 +102,7 @@ You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Tho
 
 The fastest path is the [Quick start](#quick-start): double-click `bg3-bridge.exe` for a guided setup that does all of the below. The manual steps here are the same actions, broken out — useful for scripting, headless setups, or when something needs adjusting.
 
-**1. Get the files.** Download `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod folder — one binary, no runtime to install.
+**1. Get the files.** Download `bg3-agent-bridge-v0.3.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod folder — one binary, no runtime to install.
 
 <details>
 <summary>From source instead (needs git, Node 20+, and npm)</summary>
