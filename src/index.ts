@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 import { readFileSync } from 'node:fs';
+import { stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -9,7 +10,7 @@ import * as z from 'zod';
 
 import { callBridge, readHello, type BridgeContext, type CallOptions } from './mailbox.js';
 import { listLogSessions, tailLog } from './logs.js';
-import { bridgeDir, logDirectories } from './paths.js';
+import { bridgeDir, logDirectories, mailboxPaths } from './paths.js';
 import { ranDirectly } from './runtime.js';
 
 /**
@@ -59,6 +60,15 @@ function json(payload: unknown): ToolResult {
 
 function failure(message: string): ToolResult {
     return { content: [{ type: 'text', text: message }], isError: true };
+}
+
+/**
+ * Await a fixed delay. Used by the poll loops that wait out async game state.
+ * Executor form (not Promise.withResolvers) is deliberate: package.json targets
+ * node>=20, and Promise.withResolvers only exists from Node 22.
+ */
+function sleep(ms: number): Promise<void> {
+    return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 interface ToolSpec<S extends z.ZodType> {
@@ -461,7 +471,7 @@ function registerTools(server: McpServer): void {
                 // always report equipped=false. Wait it out and report the settled
                 // state, so callers get one honest answer instead of two calls.
                 const applied = await callBridge('server', 'item.preview', { action, template, slot, character });
-                await new Promise((resolve) => setTimeout(resolve, 900));
+                await sleep(900);
                 const settled = await callBridge('server', 'item.preview', { action: 'status' });
                 return json({ applied, settled });
             } catch (error) {
@@ -790,22 +800,255 @@ function registerTools(server: McpServer): void {
                 'Reinitialise the Lua state so edited mod Lua takes effect without restarting the game. This is the fast half of ' +
                 'the edit-test loop; changes to packed data such as stats or root templates still need a repack and restart. ' +
                 'Note this resets BOTH the server and client VMs whichever context you target — all in-memory Lua state is lost, ' +
-                'including runtime stat edits made with bg3_stats_set.',
+                'including runtime stat edits made with bg3_stats_set. By default this WAITS for the reload to finish and confirms ' +
+                'it: it records the handshake file\'s timestamp, triggers the reset, waits for Bridge.Start to rewrite that ' +
+                'handshake (the definitive "VM rebooted" signal — no dependence on Script Extender logging being enabled), then ' +
+                'pings the fresh VM and returns {reloaded, rebooted, responsive, durationMs, capabilities}. A syntax error in a ' +
+                'reloaded script stops Bridge.Start, so the handshake never advances and this correctly reports reloaded:false. ' +
+                'Pass wait=false for fire-and-forget.',
             inputSchema: z.object({
                 context: contextSchema.describe(
-                    'Which context carries the request. It does not scope the reset — both VMs restart either way.',
+                    'Which context carries the request, and whose handshake confirms the reload. ' +
+                        'It does not scope the reset — both VMs restart either way.',
                 ),
+                wait: z
+                    .boolean()
+                    .default(true)
+                    .describe('Wait for the fresh handshake and ping, and report the outcome. false returns as soon as the reset is scheduled.'),
+                timeoutMs: z
+                    .number()
+                    .int()
+                    .min(1000)
+                    .max(30000)
+                    .default(8000)
+                    .describe('How long to wait for the rebooted handshake before reporting reloaded:false'),
             }),
         },
-        async ({ context }) => {
-            const result = await bridge(context, 'reset');
-            if (result.isError === true) return result;
-            return text(
-                `Lua VM reset scheduled (requested via the ${context} context; both server and client VMs restart). ` +
-                    `Give it a moment, then call bg3_read_log with logType "extender" to see whether your ` +
-                    `scripts reloaded cleanly.`,
-            );
+        async ({ context, wait, timeoutMs }) => {
+            const helloPath = mailboxPaths(context).hello;
+            // The handshake file is rewritten by Bridge.Start on every boot, so
+            // its mtime advancing is the definitive "VM rebooted" signal — and,
+            // unlike scraping the extender log for a marker, it works whether or
+            // not Script Extender runtime logging is enabled (it often is not,
+            // which produced false reloaded:false reports).
+            let beforeMtime = -1;
+            try {
+                beforeMtime = (await stat(helloPath)).mtimeMs;
+            } catch {
+                // No prior handshake: the bridge has not booted this session. A
+                // reboot creates the file, which the poll still detects (> -1).
+            }
+
+            try {
+                await callBridge(context, 'reset');
+            } catch (error) {
+                return failure(`reset request failed: ${(error as Error).message}`);
+            }
+
+            if (!wait) {
+                return json({
+                    scheduled: true,
+                    context,
+                    note: 'Reset scheduled (both server and client VMs restart). Call bg3_bridge_status to confirm it came back.',
+                });
+            }
+
+            const started = Date.now();
+            let rebooted = false;
+            while (Date.now() - started < timeoutMs) {
+                await sleep(300);
+                try {
+                    if ((await stat(helloPath)).mtimeMs > beforeMtime) {
+                        rebooted = true;
+                        break;
+                    }
+                } catch {
+                    // File briefly absent mid-reboot: keep polling.
+                }
+            }
+
+            if (!rebooted) {
+                return json({
+                    reloaded: false,
+                    rebooted: false,
+                    context,
+                    durationMs: Date.now() - started,
+                    note:
+                        `No fresh handshake within ${timeoutMs}ms. The reset may still be settling, or a reloaded script failed ` +
+                        `to boot (a Lua syntax error stops Bridge.Start). Call bg3_bridge_status, and check the extender log for errors.`,
+                });
+            }
+
+            // Confirm the rebooted VM actually answers, and read its capabilities.
+            let responsive = false;
+            let capabilities: unknown;
+            try {
+                const pong = await callBridge<{ capabilities?: unknown }>(context, 'ping', {}, { timeoutMs: 3000 });
+                responsive = true;
+                capabilities = pong.capabilities;
+            } catch {
+                responsive = false;
+            }
+
+            return json({
+                reloaded: rebooted && responsive,
+                rebooted,
+                responsive,
+                context,
+                durationMs: Date.now() - started,
+                capabilities,
+                note:
+                    rebooted && responsive
+                        ? 'VM restarted cleanly and the bridge is answering.'
+                        : 'Handshake was rewritten but the bridge did not answer a ping yet — it may still be settling; retry bg3_bridge_status.',
+            });
         },
+    );
+
+    defineTool(
+        server,
+        'bg3_resolve_character',
+        {
+            title: 'Resolve a character and its identity',
+            description:
+                'Resolve a character to its stable identity, or list the party. BG3 character identity is a minefield: ' +
+                'GetHostCharacter() returns a BARE UUID and follows CONTROL (it moves to a companion when the avatar is ' +
+                'downed and does not revert on resurrect), while Osiris events deliver PREFIXED template-name forms ' +
+                '(Elves_Female_High_Player_<uuid>) that fail bare-string equality. action=resolve takes any of those ' +
+                'forms (or a display name) and returns the bare uuid, the prefixed form, the display name, whether the ' +
+                'entity is the player-created Tav (the AvatarComponent, which stays put across control and death \u2014 the ' +
+                'reliable "who is the player" signal), whether it is currently host-controlled, HP, and dead/downed ' +
+                'state. action=party lists every party member the same way; action=host resolves whoever holds control ' +
+                'right now. Server-side only.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['resolve', 'party', 'host'])
+                    .default('resolve')
+                    .describe('resolve one id (default), list the whole party, or resolve the control-holding host'),
+                id: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Character to resolve for action=resolve: a bare UUID, a prefixed template-name form, or a ' +
+                            'display name (matched against party members). Defaults to the host character.',
+                    ),
+            }),
+        },
+        // Server-side: Osi and ServerCharacter live only in the server VM.
+        async ({ action, id }) => bridge('server', 'character.resolve', { action, id }),
+    );
+
+    defineTool(
+        server,
+        'bg3_life',
+        {
+            title: 'Damage, heal, down, kill or resurrect a character',
+            description:
+                'Drive a character\'s health and life state for testing death/downing/healing logic. Osiris has no ' +
+                'reliable damage/HP verbs (Osi.SetHitpoints/Die are absent; Osi.ApplyDamage accepts 3 args but produces ' +
+                'no observable damage), so damage/heal/setHp/fullHeal/kill work by writing HealthComponent.Hp and ' +
+                'replicating. That is NOT combat-faithful: an HP write to 0 does not run the DOWNED/DYING/Died pipeline ' +
+                'the way a real hit does (and inside a suppressed a scene-manager mod scene leaves a "limbo death"), so validate real ' +
+                'death logic with an in-game hit where it matters. down applies the DOWNED status (only sticks with no ' +
+                'active scene/suppressor); resurrect uses Osi.Resurrect when present and otherwise just restores HP. ' +
+                'Every mutating action reports before/after HP and dead/downed state after a short settle window, plus ' +
+                'the method used and any faithfulness caveat. Server-side only. Verify the settled result, not the call.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['status', 'damage', 'heal', 'setHp', 'fullHeal', 'kill', 'down', 'resurrect'])
+                    .default('status')
+                    .describe(
+                        'status reads HP + life state; damage/heal/setHp/fullHeal/kill write HP; down applies DOWNED; ' +
+                            'resurrect restores life (Osi.Resurrect when available)',
+                    ),
+                character: z.string().optional().describe('Character UUID (bare or prefixed); defaults to the host character'),
+                amount: z
+                    .number()
+                    .optional()
+                    .describe('HP amount for damage/heal/setHp. Required for those actions; ignored otherwise.'),
+                duration: z.number().default(6).describe('Seconds the DOWNED status lasts for action=down'),
+                settleMs: z
+                    .number()
+                    .int()
+                    .min(0)
+                    .max(10000)
+                    .default(500)
+                    .describe('How long to wait after the change before reading post-state. 0 reads immediately (may miss async settle).'),
+            }),
+        },
+        // Server-side: entity health writes and Osi calls are server-only.
+        async ({ action, character, amount, duration, settleMs }) =>
+            bridge('server', 'life', { action, character, amount, duration, settleMs }),
+    );
+
+    defineTool(
+        server,
+        'bg3_osiris_functions',
+        {
+            title: 'List or probe Osiris functions',
+            description:
+                'Discover Osiris calls/queries/events instead of guessing names like ApplyDamage/DealDamage/Damage ' +
+                'blindly. action=list enumerates the whole Osi table (pairs(Osi) is enumerable — ~1303 names on SE v32), ' +
+                'optionally narrowed by a substring query — this is the authoritative name set. What list cannot give is ' +
+                'a reliable arity/type per name: the generated signatures lie and only a real call settles a shape. ' +
+                'action=probe fills that gap for specific names by calling each with zero arguments inside pcall: SE ' +
+                'raises a distinct "No function named X ... with N parameters" for a name it knows (exists:true) versus ' +
+                'an "attempt to call a nil value" for one it does not (exists:false). SE rejects a wrong arity BEFORE ' +
+                'executing, so probing never triggers a mutating call (those are all arity >= 1); only a genuinely ' +
+                'parameterless function (usually a harmless query) would actually run, which is flagged. Probe confirms ' +
+                'existence, not the correct arity — the error text does not reveal it. Server-side only.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['list', 'probe'])
+                    .default('list')
+                    .describe('list enumerates Osi names (optionally filtered by query); probe checks specific names for existence'),
+                query: z
+                    .string()
+                    .optional()
+                    .describe('Case-insensitive substring filter for action=list, e.g. "damage", "status", "hitpoint"'),
+                names: z
+                    .array(z.string().min(1))
+                    .optional()
+                    .describe('Osiris function names to check for action=probe, e.g. ["ApplyDamage","SetHitpoints","Resurrect","Die"]'),
+                limit: z
+                    .number()
+                    .int()
+                    .min(1)
+                    .max(5000)
+                    .default(100)
+                    .describe('Maximum names returned by action=list; matches are counted in full'),
+            }),
+        },
+        // Server-side: the Osi story-function table lives in the server VM.
+        async ({ action, query, names, limit }) => bridge('server', 'osiris.probe', { action, query, names, limit }),
+    );
+
+    defineTool(
+        server,
+        'bg3_vfs_probe',
+        {
+            title: 'Probe what the game VFS serves for a path',
+            description:
+                'Read a file through the game\'s virtual file system and report the byte length it serves \u2014 the decisive ' +
+                'test for which physical copy is live when both a .pak and loose files exist. BG3 binds a module to its ' +
+                'pak: with Mods/<mod>.pak installed AND loose dirs in Data/, the game serves the PAK copy of every file ' +
+                '("loose overrides pak" does NOT hold), and a new loose file is invisible until restart because the VFS ' +
+                'loose index is built at boot. Compare this length against your on-disk source to know whether an edit is ' +
+                'actually being served. Note LoadFile needs the ioContext arg ("data" for mod content); without it some ' +
+                'paths return nil. Lua hot-reload (bg3_reload) is the exception that re-reads scripts from disk.',
+            inputSchema: z.object({
+                path: z
+                    .string()
+                    .min(1)
+                    .describe('VFS path, e.g. "Mods/BG3AgentBridge/ScriptExtender/Lua/BootstrapServer.lua"'),
+                ioContext: z
+                    .enum(['data', 'user', 'save'])
+                    .default('data')
+                    .describe('LoadFile context. "data" for mod/game content; most mod paths need this.'),
+                context: contextSchema,
+            }),
+        },
+        async ({ path, ioContext, context }) => bridge(context, 'vfs.probe', { path, ioContext }),
     );
 
     defineTool(

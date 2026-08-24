@@ -6,6 +6,17 @@ Notable changes to the bridge, newest first. Earlier history is in the git log; 
 
 First public release. Versions below the entries are commit dates, not separate releases.
 
+### Added — 2026-08-24
+
+- `bg3_resolve_character` — resolves any character reference (bare UUID, prefixed template-name form, or display name) to a stable identity: bare uuid, prefixed form, display name, whether it is the player-created Tav (`AvatarComponent`, stable across control hand-offs and death), whether it is host-controlled now, HP, and dead/downed state. `action=party` lists the party the same way; `action=host` resolves the control-holder. Addresses the identity minefield where `GetHostCharacter()` returns a bare UUID and follows control while Osiris events deliver prefixed forms that fail bare-string equality.
+- `bg3_life` — damage/heal/setHp/fullHeal/kill/down/resurrect for a character, reporting before/after HP and dead/downed state after a settle window, plus the `method` used and a faithfulness `caveat`. HP is set via `Osi.SetHitpoints` (verified present against the live game), falling back to a `HealthComponent.Hp` write + replicate when unavailable; the settle read surfaces an ineffective queued call as `after != target` rather than a false success. Setting HP is still not a damage/attack event, so combat and death triggers can differ from a real hit (a raw write to 0 can leave a "limbo death" inside a suppressed a scene-manager mod scene); `down` applies DOWNED, `resurrect` uses `Osi.Resurrect` when present. Backs the death/downing testing the field notes call out.
+- `bg3_osiris_functions` — `action=list` enumerates the live `Osi` table (`pairs(Osi)`, ~1303 names on SE v32) filtered by substring; `action=probe` calls specific names with zero arguments inside pcall and classifies SE's error text to report existence without triggering mutating calls. Confirms existence, not arity.
+- `bg3_vfs_probe` — reads a path through the game VFS (`Ext.IO.LoadFile`) and reports the byte length served, the decisive test for whether the live copy is the pak or a loose file when both exist.
+
+### Changed — 2026-08-24
+
+- `bg3_reload` now waits for the reload to complete by default and confirms it without depending on Script Extender logging: it records the handshake file's timestamp, triggers the reset, waits for `Bridge.Start` to rewrite that handshake (the definitive "VM rebooted" signal), then pings the fresh VM and returns `{reloaded, rebooted, responsive, durationMs, capabilities}`. A Lua syntax error in a reloaded script stops `Bridge.Start`, so the handshake never advances and it correctly reports `reloaded:false`. `wait=false` restores fire-and-forget. (Replaces the initial log-marker approach, which reported false negatives when runtime file-logging was disabled.)
+
 ### Added — 2026-08-12
 
 - `bg3_trace_events` — captures the ordered Osiris story-event stream (`>>> event Name(args)` lines) from the Osiris Runtime log: `start` marks a position, `read` returns events since, filtered by an event-name regex and/or an entity substring (a bare UUID matches its prefixed template-name form in event arguments). Log lines carry no timestamps, so the stream is ordered but not timed.

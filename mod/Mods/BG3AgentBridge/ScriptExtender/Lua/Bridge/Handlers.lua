@@ -2717,3 +2717,444 @@ H["reset"] = function()
     Bridge.pendingReset = true
     return { scheduled = true, context = Bridge.context }
 end
+
+--- Character identity, health/life actions, Osiris probing and VFS probing ---
+--
+-- These four handlers back bg3_resolve_character, bg3_life,
+-- bg3_osiris_functions and bg3_vfs_probe. Everything Osiris-facing is wrapped
+-- in pcall: Osi is a lazy proxy where type() lies and a missing function
+-- surfaces only when called (see the field notes), so nothing here trusts a
+-- name exists until a protected call proves it.
+
+--- The bare UUID an entity carries, or nil. Osiris events deliver prefixed
+--- template-name forms while GetHostCharacter returns a bare UUID; the bare
+--- form under UuidComponent.EntityUuid is the one that compares reliably.
+local function bareUuidOf(entity)
+    local ok, value = pcall(function()
+        return entity.Uuid.EntityUuid
+    end)
+    if ok and value ~= nil and tostring(value) ~= "" then
+        return tostring(value)
+    end
+    return nil
+end
+
+--- Resolve the localised name of a live character. The DisplayName component's
+--- Name is a TranslatedString with a :Get(); NameKey is the fallback handle.
+local function characterDisplayName(entity)
+    local ok, value = pcall(function()
+        return entity.DisplayName.Name:Get()
+    end)
+    if ok and value ~= nil and tostring(value) ~= "" then
+        return tostring(value)
+    end
+    return nil
+end
+
+--- The prefixed template-name form Osiris events use, best effort:
+--- <RootTemplateName>_<uuid>. Nil when the template name cannot be read.
+local function prefixedNameOf(entity, uuid)
+    if uuid == nil then
+        return nil
+    end
+    local ok, name = pcall(function()
+        return entity.ServerCharacter.Template.Name
+    end)
+    if ok and name ~= nil and tostring(name) ~= "" then
+        return tostring(name) .. "_" .. uuid
+    end
+    return nil
+end
+
+--- Read HP/MaxHp/invulnerability from the HealthComponent (fields Hp, MaxHp,
+--- IsInvulnerable — probed and confirmed against the SE type stubs).
+local function healthOf(entity)
+    local ok, hp, maxHp, invuln = pcall(function()
+        local h = entity.Health
+        return h.Hp, h.MaxHp, h.IsInvulnerable
+    end)
+    if not ok then
+        return nil
+    end
+    return { hp = hp, maxHp = maxHp, invulnerable = invuln }
+end
+
+--- Osi query result as a plain 0/1-ish boolean, or nil when the query does not
+--- exist or fails. Reads are side-effect free, so this is safe to call blindly.
+local function osiBool(name, arg)
+    local ok, value = pcall(function()
+        return Osi[name](arg)
+    end)
+    if not ok then
+        return nil
+    end
+    if value == nil then
+        return nil
+    end
+    return value == 1 or value == true
+end
+
+--- Build the identity/state snapshot for one character entity.
+local function describeCharacter(entity, input)
+    local uuid = bareUuidOf(entity)
+    local isAvatar = false
+    do
+        local ok, avatar = pcall(function()
+            return entity.Avatar
+        end)
+        isAvatar = ok and avatar ~= nil
+    end
+
+    local host = nil
+    do
+        local ok, value = pcall(Osi.GetHostCharacter)
+        if ok and value ~= nil then
+            host = tostring(value)
+        end
+    end
+
+    return {
+        input = input ~= nil and tostring(input) or nil,
+        uuid = uuid,
+        prefixed = prefixedNameOf(entity, uuid),
+        displayName = characterDisplayName(entity),
+        -- AvatarComponent marks the player-created Tav and stays put across
+        -- control hand-offs and death, unlike GetHostCharacter which follows
+        -- control. This is the stable "who is the player character" signal.
+        isAvatar = isAvatar,
+        isHostControlled = uuid ~= nil and host ~= nil and uuid == host,
+        health = healthOf(entity),
+        isDead = osiBool("IsDead", uuid),
+        isDowned = osiBool("IsDowned", uuid),
+    }
+end
+
+--- Resolve a character argument that may be a bare UUID, a prefixed
+--- template-name form, or (as a fallback) a display name, to an entity. An
+--- empty/nil id means the host character.
+local function resolveCharacterEntity(id)
+    if id == nil or id == "" then
+        local ok, host = pcall(Osi.GetHostCharacter)
+        if not ok or host == nil then
+            error("no id given and GetHostCharacter is unavailable")
+        end
+        return Ext.Entity.Get(tostring(host)), tostring(host)
+    end
+
+    -- Ext.Entity.Get accepts both the bare and prefixed forms.
+    local entity = Ext.Entity.Get(id)
+    if entity ~= nil then
+        return entity, id
+    end
+
+    -- Fallback: treat id as a display name and scan party members, the small
+    -- set an agent is realistically naming. A full character scan would be far
+    -- more expensive and rarely what "resolve this name" means.
+    local needle = string.lower(tostring(id))
+    local ok, rows = pcall(function()
+        return Osi.DB_Players:Get(nil)
+    end)
+    if ok and type(rows) == "table" then
+        for _, row in ipairs(rows) do
+            local guid = row[1]
+            local candidate = guid ~= nil and Ext.Entity.Get(tostring(guid)) or nil
+            if candidate ~= nil then
+                local name = characterDisplayName(candidate)
+                if name ~= nil and string.lower(name) == needle then
+                    return candidate, guid
+                end
+            end
+        end
+    end
+
+    error("no character found for id: " .. tostring(id))
+end
+
+H["character.resolve"] = function(params)
+    if not Bridge.capabilities.entity then
+        error("Ext.Entity is unavailable in this Script Extender build")
+    end
+
+    local action = params.action or "resolve"
+
+    if action == "party" then
+        local ok, rows = pcall(function()
+            return Osi.DB_Players:Get(nil)
+        end)
+        if not ok or type(rows) ~= "table" then
+            error("could not read DB_Players (no save loaded, or Osiris unavailable)")
+        end
+        local party = {}
+        for _, row in ipairs(rows) do
+            local guid = row[1]
+            local entity = guid ~= nil and Ext.Entity.Get(tostring(guid)) or nil
+            if entity ~= nil then
+                party[#party + 1] = describeCharacter(entity, guid)
+            end
+        end
+        return { action = "party", count = #party, party = party }
+    end
+
+    if action == "host" then
+        local ok, host = pcall(Osi.GetHostCharacter)
+        if not ok or host == nil then
+            error("GetHostCharacter is unavailable")
+        end
+        local entity = Ext.Entity.Get(tostring(host))
+        if entity == nil then
+            error("host character entity not found: " .. tostring(host))
+        end
+        return { action = "host", character = describeCharacter(entity, host) }
+    end
+
+    -- resolve (default)
+    local entity, resolvedId = resolveCharacterEntity(params.id)
+    return { action = "resolve", character = describeCharacter(entity, resolvedId) }
+end
+
+--- Set HP to a clamped value; returns the value written and the method used.
+--- Prefers Osi.SetHitpoints — the engine's own setter, which fires side effects
+--- a raw component write skips (the point of a more faithful death/heal path) —
+--- and falls back to a Health.Hp write + replicate when the Osiris call is
+--- unavailable or raises. The caller's settle window reads the real post-state,
+--- so an ineffective queued call still surfaces as after != target, not a false
+--- success.
+local function applyHp(entity, uuid, value, maxHp)
+    local target = math.max(0, math.min(math.floor(value), maxHp or value))
+    if pcall(Osi.SetHitpoints, uuid, target) then
+        return target, "Osi.SetHitpoints"
+    end
+    entity.Health.Hp = target
+    pcall(function()
+        entity:Replicate("Health")
+    end)
+    return target, "entity.Health.Hp write"
+end
+
+H["life"] = function(params, seq)
+    if not Bridge.capabilities.entity then
+        error("Ext.Entity is unavailable in this Script Extender build")
+    end
+
+    local action = params.action or "status"
+    local entity, uuid = resolveCharacterEntity(params.character)
+
+    local before = healthOf(entity)
+    if action ~= "status" and before == nil then
+        error("character has no HealthComponent: " .. tostring(uuid))
+    end
+
+    local method = nil
+    local caveat = nil
+
+    if action == "status" then
+        -- Read-only: answer immediately, no settle needed.
+        return {
+            action = "status",
+            uuid = uuid,
+            health = before,
+            isDead = osiBool("IsDead", uuid),
+            isDowned = osiBool("IsDowned", uuid),
+        }
+    elseif action == "sethp" or action == "setHp" then
+        local amount = tonumber(params.amount)
+        if amount == nil then
+            error("action setHp requires a numeric amount")
+        end
+        local _, m = applyHp(entity, uuid, amount, before.maxHp)
+        method = m
+    elseif action == "damage" then
+        local amount = tonumber(params.amount)
+        if amount == nil then
+            error("action damage requires a numeric amount")
+        end
+        -- Sets HP directly (engine setter when available, else a component
+        -- write): not a damage/attack event, so no attacker, damage type or hit
+        -- reaction, and combat/death triggers may differ from a real hit.
+        caveat = "sets HP, not a damage event: no attacker/damage-type/hit-reaction, so combat and death triggers may differ from a real hit"
+        local _, m = applyHp(entity, uuid, before.hp - amount, before.maxHp)
+        method = m
+    elseif action == "heal" then
+        local amount = tonumber(params.amount)
+        if amount == nil then
+            error("action heal requires a numeric amount")
+        end
+        local _, m = applyHp(entity, uuid, before.hp + amount, before.maxHp)
+        method = m
+    elseif action == "fullheal" or action == "fullHeal" then
+        local _, m = applyHp(entity, uuid, before.maxHp, before.maxHp)
+        method = m
+    elseif action == "kill" then
+        caveat = "sets HP to 0: via Osi.SetHitpoints when available (may route through the death pipeline) or a raw write (which inside a suppressed scene leaves a limbo death). Confirm the reported after/isDead."
+        local _, m = applyHp(entity, uuid, 0, before.maxHp)
+        method = m
+    elseif action == "down" then
+        local dur = tonumber(params.duration) or 6
+        local ok = pcall(Osi.ApplyStatus, uuid, "DOWNED", dur, 1, uuid)
+        if not ok then
+            ok = pcall(Osi.ApplyStatus, uuid, "DOWNED", dur)
+        end
+        if not ok then
+            error("Osi.ApplyStatus(DOWNED) failed — the status may be rejected while a scene/suppressor is active")
+        end
+        method = "Osi.ApplyStatus(DOWNED)"
+        caveat = "DOWNED only sticks once no scene/SceneMod_DisableAI is active; it may be rejected or clobbered otherwise"
+    elseif action == "resurrect" then
+        local ok = pcall(Osi.Resurrect, uuid)
+        if not ok then
+            ok = pcall(Osi.Resurrect, uuid, 100, "")
+        end
+        if ok then
+            method = "Osi.Resurrect"
+        else
+            method = "entity.Health.Hp write (Osi.Resurrect unavailable)"
+            caveat = "Osi.Resurrect not available; restored HP only, which cannot clear a true engine death state"
+        end
+        applyHp(entity, uuid, before.maxHp, before.maxHp)
+    else
+        error("unknown action: " .. tostring(action)
+            .. " (expected status, damage, heal, setHp, fullHeal, kill, down or resurrect)")
+    end
+
+    -- Osiris and health changes settle over the next ticks (see field notes:
+    -- pcall success is not proof an effect landed), so read post-state after a
+    -- short window and report before/after rather than trusting the write.
+    local settleMs = clampNumber(params.settleMs, 500, 0, 10000)
+    local function report()
+        local fresh = Ext.Entity.Get(uuid) or entity
+        return {
+            action = action,
+            uuid = uuid,
+            method = method,
+            caveat = caveat,
+            before = before,
+            after = healthOf(fresh),
+            isDead = osiBool("IsDead", uuid),
+            isDowned = osiBool("IsDowned", uuid),
+        }
+    end
+
+    if settleMs <= 0 or Ext.Timer == nil or type(Ext.Timer.WaitFor) ~= "function" then
+        return report()
+    end
+    Ext.Timer.WaitFor(settleMs, function()
+        Bridge.Respond(seq, true, report())
+    end)
+    return Bridge.DEFERRED
+end
+
+--- Enumerate or probe Osiris functions.
+---
+--- action=list iterates pairs(Osi): the Osi proxy is enumerable (measured at
+--- 1303 names against SE v32, matching the generated Osi.lua + Osi.Events.lua
+--- declarations exactly), so the full name set IS reachable — what is NOT
+--- reachable is a reliable arity/type per name (the generated signatures lie,
+--- and only a real call settles a shape). action=probe fills that gap for
+--- specific names: it calls each with zero arguments inside pcall and
+--- classifies the result. SE raises a distinct "No function named X ... with N
+--- parameters" for a name it knows (exists) versus an "attempt to call a nil
+--- value" for one it does not. Because SE rejects a wrong arity BEFORE
+--- executing, probing never triggers a mutating call (those are all arity
+--- >= 1); only a genuinely parameterless function (usually a harmless query)
+--- would actually run, which is flagged. Probing confirms existence, not the
+--- correct arity — the error text does not reveal it.
+H["osiris.probe"] = function(params)
+    local action = params.action or "list"
+
+    if action == "list" then
+        local query = nil
+        if type(params.query) == "string" and params.query ~= "" then
+            query = string.lower(params.query)
+        end
+        local limit = clampNumber(params.limit, 100, 1, 5000)
+        local names = {}
+        local total, matched = 0, 0
+        for name in pairs(Osi) do
+            total = total + 1
+            local text = tostring(name)
+            if query == nil or string.find(string.lower(text), query, 1, true) ~= nil then
+                matched = matched + 1
+                if #names < limit then
+                    names[#names + 1] = text
+                end
+            end
+        end
+        table.sort(names)
+        return { action = "list", total = total, matched = matched, returned = #names, functions = names }
+    end
+
+    if action ~= "probe" then
+        error("unknown action: " .. tostring(action) .. " (expected list or probe)")
+    end
+
+    local names = params.names
+    if type(names) ~= "table" then
+        if type(params.name) == "string" and params.name ~= "" then
+            names = { params.name }
+        else
+            error("params.names (array) or params.name (string) is required")
+        end
+    end
+
+    local results = {}
+    for _, name in ipairs(names) do
+        local entry = { name = name }
+        local ok, err = pcall(function()
+            return Osi[name]()
+        end)
+        if ok then
+            -- No error: the function exists and was callable with 0 args, which
+            -- means it ran. Almost always a parameterless query.
+            entry.exists = true
+            entry.note = "callable with 0 arguments; it was executed (likely a parameterless query)"
+        else
+            local message = tostring(err)
+            entry.error = message
+            if string.find(message, "No function named", 1, true) ~= nil
+                or string.find(message, "can be called with", 1, true) ~= nil then
+                -- SE knows the name but not at arity 0: it exists with some
+                -- other arity. The message does not reveal the correct arity.
+                entry.exists = true
+                entry.note = "exists, but not at arity 0 — confirm the real arity from a real call"
+            elseif string.find(message, "nil value", 1, true) ~= nil then
+                entry.exists = false
+            else
+                entry.exists = nil
+                entry.note = "could not classify — inspect error"
+            end
+        end
+        results[#results + 1] = entry
+    end
+
+    return { action = "probe", count = #results, functions = results }
+end
+
+--- Probe what the game's virtual file system actually serves for a path.
+--- Ext.IO.LoadFile reads through the VFS, so the byte length it returns is the
+--- decisive tell for which physical copy (pak vs loose) is live — the field
+--- notes' pak-binding gotcha. The 'data' context is required for most mod
+--- paths; LoadFile without it can return nil where it would otherwise succeed.
+H["vfs.probe"] = function(params)
+    local path = params.path
+    if type(path) ~= "string" or path == "" then
+        error("params.path is required (a VFS path, e.g. Mods/<Mod>/ScriptExtender/Lua/BootstrapServer.lua)")
+    end
+    local ioContext = params.ioContext or "data"
+
+    local ok, content = pcall(Ext.IO.LoadFile, path, ioContext)
+    if not ok then
+        error("LoadFile raised: " .. tostring(content))
+    end
+    if content == nil then
+        return { path = path, ioContext = ioContext, exists = false }
+    end
+
+    local text = tostring(content)
+    return {
+        path = path,
+        ioContext = ioContext,
+        exists = true,
+        length = #text,
+        preview = string.sub(text, 1, 200),
+    }
+end
