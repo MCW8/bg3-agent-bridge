@@ -224,6 +224,21 @@ export function performInstall(opts: { uninstall?: boolean } = {}): InstallResul
     return { uninstall: false, gameDir, target, copied, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
 }
 
+/**
+ * Read-only check of whether the mod is already installed, for the setup wizard
+ * to decide between installing and offering to uninstall. Never throws — a game
+ * it cannot find just reports not-installed.
+ */
+export function installStatus(): { gameDir: string | null; installed: boolean } {
+    let gameDir: string;
+    try {
+        gameDir = findGameDir();
+    } catch {
+        return { gameDir: null, installed: false };
+    }
+    return { gameDir, installed: existsSync(path.join(gameDir, 'Data', 'Mods', MOD_FOLDER)) };
+}
+
 /** The `bg3-bridge install` command: install, then print the config to paste. */
 export function installMod(args: string[]): void {
     const r = performInstall({ uninstall: args.includes('--uninstall') });

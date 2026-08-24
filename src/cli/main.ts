@@ -4,8 +4,9 @@
  * and every maintenance command, so a modder never installs Node.
  *
  *   bg3-bridge              guided setup when double-clicked; the MCP server when an agent launches it
- *   bg3-bridge setup        run the guided setup explicitly (install + connect + check)
+ *   bg3-bridge setup        run the guided setup (install on a fresh machine, or manage an existing install)
  *   bg3-bridge install      install the companion mod into the game
+ *   bg3-bridge uninstall    remove the companion mod from the game
  *   bg3-bridge configure    print or write the agent's MCP config
  *   bg3-bridge check        talk to the game without an agent in the loop
  *   bg3-bridge pack         build a .pak with divine (needs LSLib)
@@ -19,9 +20,10 @@ import { main as setupMain } from './setup-wizard.js';
 
 const USAGE = `
   bg3-bridge                  guided setup when double-clicked; the MCP server when launched by an agent
-  bg3-bridge setup            run the guided setup (install + connect + check)
+  bg3-bridge setup            guided setup: install on a fresh machine, or reinstall/uninstall
   bg3-bridge serve            run the MCP server explicitly
   bg3-bridge install          install the companion mod (--uninstall to remove)
+  bg3-bridge uninstall        remove the companion mod (alias for install --uninstall)
   bg3-bridge configure        print the agent MCP config (--list, --write, --path)
   bg3-bridge check            verify the bridge without an agent
   bg3-bridge pack             build a .pak with divine
@@ -49,6 +51,9 @@ switch (command) {
         break;
     case 'install':
         installMain(args);
+        break;
+    case 'uninstall':
+        installMain(['--uninstall']);
         break;
     case 'configure':
         configureMain(args);

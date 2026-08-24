@@ -82,10 +82,10 @@ That is the whole point — `bg3_eval` runs whatever it is given in the live ses
 
 Fine while you are actively modding — the only situation it is built for. Bad to leave installed and forgotten.
 
-**Uninstall it when you are done:**
+**Uninstall it when you are done** — double-click `bg3-bridge.exe` again (with the game closed) and choose **Uninstall**, or from a terminal:
 
 ```bash
-.\bg3-bridge install --uninstall
+.\bg3-bridge uninstall
 ```
 
 Then remove the server from your agent's MCP config. `bg3_bridge_status` reports whether it is still live.
@@ -507,7 +507,7 @@ Reloading a *save* applies none of these — it re-reads the save, not the modul
 | Installed, but the game ignores the mod | If a packed `Mods\...pak` for it also exists, the game serves the pak and ignores loose files — remove the pak. Make sure "BG3 Agent Bridge" is enabled in your mod manager / load order. `bg3_vfs_probe` shows which copy is live. |
 | Edited Lua, but nothing changed | Ask the agent to run `bg3_reload` (loose Lua hot-reloads). Packed data — stats, templates, textures — needs a full game restart, not a reload. |
 | Config path "breaks the file" | Use forward slashes `/` or escaped `\\` in JSON paths; a single `\` is an escape character. `configure --write` handles this for you. |
-| Done modding | `.\bg3-bridge install --uninstall`, then remove the server from your agent's MCP config. |
+| Done modding | Double-click `bg3-bridge.exe` and choose **Uninstall** (or `.\bg3-bridge uninstall`), then remove the server from your agent's MCP config. |
 
 ## Legal
 
