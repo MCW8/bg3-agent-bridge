@@ -17,7 +17,7 @@ import { homedir } from 'node:os';
 import path from 'node:path';
 
 import { MOD_FOLDER } from '../paths.js';
-import { invocation, isCompiledExe, mcpServerEntry, packageRoot, ranDirectly } from '../runtime.js';
+import { isCompiledExe, mcpServerEntry, packageRoot, ranDirectly } from '../runtime.js';
 
 const MOD_NAME = 'BG3 Agent Bridge';
 const MOD_UUID = 'b0636853-9a7e-4fe9-b78c-1ff567ac2265';
@@ -29,9 +29,11 @@ const localAppData = process.env.LOCALAPPDATA ?? path.join(homedir(), 'AppData',
 const larianDir = path.join(localAppData, 'Larian Studios', "Baldur's Gate 3");
 const modsettingsPath = path.join(larianDir, 'PlayerProfiles', 'Public', 'modsettings.lsx');
 
+// Throw rather than exit: the setup wizard calls installMod() and needs to
+// present failures (game still running, etc.) and pause, which process.exit
+// would skip. The CLI wrapper below turns a throw back into a clean exit.
 function fail(message: string): never {
-    console.error(`\n  ${message}\n`);
-    process.exit(1);
+    throw new Error(message);
 }
 
 /** Steam records its library roots in libraryfolders.vdf; parse the paths out. */
@@ -176,9 +178,23 @@ function checkNodeVersion(): void {
     }
 }
 
-export function main(args: string[]): void {
+export interface InstallResult {
+    uninstall: boolean;
+    gameDir: string;
+    target: string;
+    copied: number | null;
+    modsettingsNote: string;
+    backupPath: string | null;
+}
+
+/**
+ * Do the install (or uninstall) and return what happened, throwing on failure.
+ * Kept free of console output so both the CLI and the setup wizard can present
+ * the result their own way.
+ */
+export function performInstall(opts: { uninstall?: boolean } = {}): InstallResult {
     checkNodeVersion();
-    const uninstall = args.includes('--uninstall');
+    const uninstall = opts.uninstall === true;
 
     if (gameIsRunning()) {
         fail(
@@ -191,16 +207,10 @@ export function main(args: string[]): void {
     const gameDir = findGameDir();
     const target = path.join(gameDir, 'Data', 'Mods', MOD_FOLDER);
 
-    console.log(`  game:  ${gameDir}`);
-    console.log(`  mod:   ${target}`);
-
     if (uninstall) {
         if (existsSync(target)) rmSync(target, { recursive: true, force: true });
         const result = updateModsettings({ remove: true });
-        console.log(`\n  Removed loose mod files.`);
-        console.log(`  modsettings.lsx: ${result.note}`);
-        if (result.backupPath) console.log(`  backup: ${result.backupPath}`);
-        return;
+        return { uninstall: true, gameDir, target, copied: null, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
     }
 
     if (!existsSync(modSource)) fail(`Mod source missing at ${modSource}`);
@@ -211,13 +221,30 @@ export function main(args: string[]): void {
 
     const copied = readdirSync(target, { recursive: true }).length;
     const result = updateModsettings({ remove: false });
+    return { uninstall: false, gameDir, target, copied, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
+}
 
-    console.log(`\n  Copied ${copied} entries.`);
-    console.log(`  modsettings.lsx: ${result.note}`);
-    if (result.backupPath) console.log(`  backup: ${result.backupPath}`);
+/** The `bg3-bridge install` command: install, then print the config to paste. */
+export function installMod(args: string[]): void {
+    const r = performInstall({ uninstall: args.includes('--uninstall') });
 
-    // Print the agent config with the real path already substituted — nobody
-    // should have to work out where they extracted this.
+    console.log(`  game:  ${r.gameDir}`);
+    console.log(`  mod:   ${r.target}`);
+
+    if (r.uninstall) {
+        console.log(`\n  Removed loose mod files.`);
+        console.log(`  modsettings.lsx: ${r.modsettingsNote}`);
+        if (r.backupPath !== null) console.log(`  backup: ${r.backupPath}`);
+        return;
+    }
+
+    console.log(`\n  Copied ${r.copied} entries.`);
+    console.log(`  modsettings.lsx: ${r.modsettingsNote}`);
+    if (r.backupPath !== null) console.log(`  backup: ${r.backupPath}`);
+
+    // Print the agent config with the real path already filled in — nobody
+    // should have to work out where they extracted this. Once it is pasted, the
+    // agent handles connecting and testing, so the rest lives in the README.
     console.log('\n  ─────────────────────────────────────────────────────────────────');
     console.log('   NEXT: copy everything between the lines and paste it to your AI');
     console.log('   agent, asking it to add this to its MCP config.');
@@ -229,18 +256,16 @@ export function main(args: string[]): void {
             .join('\n'),
     );
     console.log('\n  ─────────────────────────────────────────────────────────────────\n');
-    console.log(
-        '  Most agents know where their own config lives, will create it if it does\n' +
-            '  not exist, and will check the JSON afterwards. Restart the agent when it\n' +
-            '  is done.\n\n' +
-            '  If yours cannot edit its own config, write it directly:\n' +
-            `    ${invocation('configure')} --list\n\n` +
-            '  Then launch Baldur\'s Gate 3, load a save, and ask your agent for\n' +
-            '  bg3_bridge_status. To check without any agent involved:\n' +
-            `    ${invocation('check')}\n\n` +
-            '  While modding: edit the Lua under mod/, re-run the install command, and\n' +
-            '  the changes apply on the next bg3_reload without restarting the game.\n',
-    );
+    console.log('  Then paste that to your agent and it takes it from here. See the README for more.\n');
+}
+
+export function main(args: string[]): void {
+    try {
+        installMod(args);
+    } catch (error) {
+        console.error(`\n  ${(error as Error).message}\n`);
+        process.exit(1);
+    }
 }
 
 if (ranDirectly(import.meta.url)) main(process.argv.slice(2));

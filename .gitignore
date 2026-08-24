@@ -2,6 +2,8 @@ node_modules/
 dist/
 *.tsbuildinfo
 *.log
+# Bun's --compile writes a temp next to the output; a failed move can leave one behind.
+.*.bun-build
 
 # Build-time-only tools (bun.exe for the exe build) — downloaded, never committed
 tools/
