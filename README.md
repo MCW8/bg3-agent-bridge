@@ -20,20 +20,23 @@ I wanted to let my AI see into Larian's Toolkit, but the Toolkit has no plugin A
 **You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+).
 
 1. **Download and extract** `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
-2. **Install the mod** — with BG3 **closed** — by running in that folder:
-   ```
-   .\bg3-bridge install
-   ```
-3. **Connect your AI agent**, then fully restart the agent app:
-   ```
-   .\bg3-bridge configure --write claude-desktop
-   ```
-   Swap `claude-desktop` for `cursor`, `kimi`, `claude-code`, or `project`. Full list and manual setup: [Connecting your AI agent](#connecting-your-ai-agent).
-4. **Check it works.** Launch BG3, load a save, then run:
-   ```
-   .\bg3-bridge check
-   ```
-   Success means the bridge is talking to your game. If anything fails, see [Troubleshooting](#troubleshooting).
+2. **Close Baldur's Gate 3, then double-click `bg3-bridge.exe`.** It installs the companion mod and prints a short MCP config block — copy it.
+3. **Paste that block to your AI agent** and ask it to add the server to its MCP config, then restart the agent. Launch BG3, load a save, and ask *"Is the BG3 bridge connected?"* — the agent takes it from there.
+
+<details>
+<summary>Prefer the command line? The same steps by hand.</summary>
+
+In the extracted folder, with BG3 closed:
+
+```
+.\bg3-bridge install                          # install the companion mod
+.\bg3-bridge configure --write claude-desktop # or cursor, kimi, claude-code, project
+.\bg3-bridge check                            # run with the game open and a save loaded
+```
+
+Full client list and manual config live under [Connecting your AI agent](#connecting-your-ai-agent).
+
+</details>
 
 **Caution:** this lets your AI agent run code inside your live game. That is the point, but only install it while you are actively modding, and [uninstall when you are done](#read-this-before-installing).
 
@@ -96,6 +99,8 @@ That is the whole list — the release ships as a single `bg3-bridge.exe`, so th
 You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Those are only for building your own `.pak` later.
 
 ## Install
+
+The fastest path is the [Quick start](#quick-start): double-click `bg3-bridge.exe` for a guided setup that does all of the below. The manual steps here are the same actions, broken out — useful for scripting, headless setups, or when something needs adjusting.
 
 **1. Get the files.** Download `bg3-agent-bridge-v0.2.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod folder — one binary, no runtime to install.
 
@@ -494,6 +499,8 @@ Reloading a *save* applies none of these — it re-reads the save, not the modul
 
 | Symptom | Fix |
 |---|---|
+| "Windows protected your PC" / SmartScreen blocks the exe | It's an unsigned indie binary. Click **More info -> Run anyway**. (Prefer not to? Run it from a terminal instead, or build from source.) |
+| Double-click flashes and closes instantly | The guided setup pauses on "Press Enter to close", so this is rare — if it happens, open a terminal in the folder and run `.\bg3-bridge setup` to see the error. |
 | Agent lists no `bg3_*` tools | The config was not picked up. Re-run `.\bg3-bridge configure --write <client>`, then **fully restart** the agent app — almost none reload config live. The client's server list should show `bg3-agent-bridge` with 26 `bg3_*` tools. |
 | `bg3_bridge_status` says both contexts offline | BG3 is not running, or no save is loaded. Launch the game and load a save — the bridge only answers in-game, and the `client` context in particular responds only after a save loads. |
 | `.\bg3-bridge install` finds no game / fails | Close BG3 first (it rewrites `modsettings.lsx` from memory on exit). If your install is not found, set `BG3_GAME_DIR` to your Baldur's Gate 3 folder and re-run. |
