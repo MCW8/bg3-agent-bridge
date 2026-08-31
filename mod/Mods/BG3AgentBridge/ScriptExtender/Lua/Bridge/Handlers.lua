@@ -1470,7 +1470,13 @@ local function onStage(id)
 end
 
 H["character.spawn"] = function(params)
-    local action = params.action or "list"
+    -- The template-means-spawn default lives here (not only in the MCP
+    -- layer) so direct dispatches — Bridge.Call from eval, other Lua —
+    -- behave the same as the tool.
+    local action = params.action
+    if action == nil or action == "" then
+        action = (type(params.template) == "string" and params.template ~= "") and "spawn" or "list"
+    end
 
     if action == "list" then
         local entries = {}
@@ -1529,9 +1535,26 @@ H["character.spawn"] = function(params)
         error("params.template is required — a character template UUID, e.g. from bg3_find_template")
     end
 
-    local template = Ext.Template.GetTemplate(templateId)
+    -- CreateAt needs a ROOT template. Field notes #7: a story character
+    -- INSTANCE uuid (e.g. from DB_Players or an Osiris event) makes
+    -- CreateAt "succeed" while spawning nothing. Probed live: both
+    -- GetRootTemplate and GetTemplate return nil for instance uuids; a
+    -- non-root template resolves through GetTemplate only. Name each case
+    -- precisely instead of letting the silent no-op through.
+    local template = Ext.Template.GetRootTemplate(templateId)
     if template == nil then
-        error("no root template found with id: " .. tostring(templateId))
+        local loose = Ext.Template.GetTemplate(templateId)
+        if loose ~= nil then
+            error(
+                "template " .. tostring(templateId) .. " resolves but is NOT a root template ("
+                    .. tostring(loose.TemplateType) .. ") — Osi.CreateAt would silently spawn nothing. "
+                    .. "bg3_find_template returns root templates; use one of those"
+            )
+        end
+        error(
+            "no template found with id: " .. tostring(templateId)
+                .. " — if this is a character INSTANCE uuid (from DB_Players or an Osiris event), it cannot be spawned directly; find its root template with bg3_find_template"
+        )
     end
     -- Spawning the wrong type is legal as far as CreateAt is concerned but
     -- rarely the intent, and an item dropped at world coordinates is hard to
@@ -1586,20 +1609,36 @@ H["character.spawn"] = function(params)
         error("Osi.CreateAt returned nothing for template " .. tostring(templateId))
     end
 
+    local spawnedId = tostring(spawned)
+
+    -- Field notes #7: CreateAt "succeeds" while the world stays empty when
+    -- the template was wrong. Round-trip the returned id and report whether
+    -- a live character actually exists there.
+    local confirmed = false
+    do
+        local okE, entity = pcall(Ext.Entity.Get, spawnedId)
+        if okE and entity ~= nil then
+            confirmed = true
+        else
+            local okX, exists = pcall(Osi.Exists, spawnedId)
+            confirmed = okX and exists == 1
+        end
+    end
+
     spawnedCharacters[#spawnedCharacters + 1] = {
-        id = tostring(spawned),
+        id = spawnedId,
         template = tostring(templateId),
         templateName = tostring(template.Name),
         x = x,
         y = y,
         z = z,
     }
-
     return {
-        spawned = tostring(spawned),
+        spawned = spawnedId,
         template = tostring(templateId),
         templateName = tostring(template.Name),
         position = { x = x, y = y, z = z },
+        confirmed = confirmed,
         tracked = #spawnedCharacters,
         note = "the engine finishes populating the entity a beat later; verify with bg3_entity_inspect",
     }
@@ -2172,16 +2211,29 @@ H["animation"] = function(params)
 end
 
 H["ping"] = function()
+    -- Health numbers (field notes #9): uptime shows whether the VM was
+    -- reset since the last check, dispatched counts handled requests, and
+    -- lastDispatchMs exposes a slow handler so agents can back off instead
+    -- of timing out blind.
+    local stats = Bridge.stats or {}
+    local uptimeMs = nil
+    if stats.startedAt ~= nil then
+        local ok, now = pcall(function()
+            return Ext.Timer.MonotonicTime()
+        end)
+        if ok and type(now) == "number" then
+            uptimeMs = math.max(0, math.floor(now - stats.startedAt))
+        end
+    end
     return {
         pong = true,
         context = Bridge.context,
         protocol = Bridge.PROTOCOL_VERSION,
         capabilities = Bridge.capabilities,
+        uptimeMs = uptimeMs,
+        dispatched = stats.dispatched,
+        lastDispatchMs = stats.lastDispatchMs,
     }
-end
-
-H["capabilities"] = function()
-    return Bridge.capabilities
 end
 
 --- The environment eval chunks run in ---------------------------------------
@@ -2217,6 +2269,205 @@ local function recordPrint(prints, ...)
         parts[i] = tostring((select(i, ...)))
     end
     prints[#prints + 1] = table.concat(parts, " ")
+end
+
+--- The Bridge table eval chunks get -----------------------------------------
+--
+-- Plain globals already persist across eval calls in one VM (chunks share
+-- the shared global table — probed live), but a long modding session (the
+-- the field notes) asked for an explicit, ergonomic surface for the
+-- three failure modes that ate the most time: silent Osi failures, cross-
+-- call state, and handle-string re-lookup.
+--
+--   Bridge.Scratch   persistent table; survives across eval calls, cleared
+--                    when the VM resets (bg3_reload) — like every global
+--   Bridge.Osi(name, ...)  {exists, ok, err, result} for an Osi call —
+--                    distinguishes missing function, call error and a nil
+--                    result, which pcall alone collapses into "worked"
+--   Bridge.Try(fn)   {ok, result, err} for any call
+--   Bridge.Fields{a = function() ... end, ...}  best-effort multi-field
+--                    return: one throwing field never discards the others
+--   Bridge.Call(op, params)  run a bridge op's handler directly (same op
+--                    names the MCP tools use); deferred ops are rejected
+--   Bridge.EntityFromHandle(s)  resolve "Entity (02000001000034ae)" or the
+--                    bare 16-hex-digit form (what tostring(entity) prints)
+--                    back to an entity
+--   Bridge.Inspect(v, depth)  depth-capped, never-raising value snapshot —
+--                    the safe way to look at a live component
+
+--- tostring(entity) prints "Entity (02000001000034ae)" — the 64-bit entity
+--- handle. That string form is rejected by Ext.Entity.Get ("not a valid
+--- GUID value") and EntityHandle is a non-object type Ext.Types.Construct
+--- refuses, so the only Lua-side path from a handle STRING back to an
+--- entity is scanning GetAllEntities for a matching tostring (~900 server
+--- entities, one tostring each — cheap for the occasional re-lookup).
+local function entityFromHandle(handle)
+    if type(handle) ~= "string" or handle == "" then
+        return nil
+    end
+    local hex = string.match(handle, "^Entity %((%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)%)%s*$")
+        or string.match(handle, "^(%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x%x)$")
+    if hex == nil then
+        return nil
+    end
+    local needle = "entity (" .. string.lower(hex) .. ")"
+    local ok, entities = pcall(Ext.Entity.GetAllEntities)
+    if not ok or type(entities) ~= "table" then
+        return nil
+    end
+    for _, entity in ipairs(entities) do
+        local okT, printed = pcall(tostring, entity)
+        if okT and printed ~= nil and string.lower(printed) == needle then
+            return entity
+        end
+    end
+    return nil
+end
+
+--- Depth-capped snapshot of a live value. Tables recurse with scalar fields
+--- first (the useful part survives truncation), userdata get one pcall'd
+--- field walk, cycles are cut, and nothing raises — the safe alternative to
+--- returning a live component, which dies at Ext.Json's depth limit.
+local function inspectValue(value, depth, seen)
+    local t = type(value)
+    if t == "nil" or t == "boolean" or t == "number" or t == "string" then
+        return value
+    end
+    if t == "function" then
+        return "function"
+    end
+    if seen == nil then
+        seen = {}
+    end
+    if t == "userdata" then
+        if depth <= 0 then
+            return tostring(value)
+        end
+        local out = { __value = tostring(value) }
+        local ok = pcall(function()
+            for key, item in pairs(value) do
+                out[tostring(key)] = inspectValue(item, depth - 1, seen)
+            end
+        end)
+        if not ok then
+            return tostring(value)
+        end
+        return out
+    end
+    if seen[value] then
+        return "<cycle>"
+    end
+    seen[value] = true
+    if depth <= 0 then
+        return "<max depth>"
+    end
+    local scalars, children = {}, {}
+    pcall(function()
+        for key, item in pairs(value) do
+            local it = type(item)
+            if it == "nil" or it == "boolean" or it == "number" or it == "string" then
+                scalars[tostring(key)] = item
+            else
+                children[tostring(key)] = item
+            end
+        end
+    end)
+    local out = {}
+    for key, item in pairs(scalars) do
+        out[key] = item
+    end
+    for key, item in pairs(children) do
+        out[key] = inspectValue(item, depth - 1, seen)
+    end
+    return out
+end
+
+local function buildBridgeApi()
+    if Bridge.evalScratch == nil then
+        Bridge.evalScratch = {}
+    end
+
+    local api = {}
+    api.Scratch = Bridge.evalScratch
+
+    --- Osi calls made honest: pcall alone collapses "function missing",
+    --- "call raised" and "returned nil" into ok=true with a nil result.
+    --- The Osi proxy returns a placeholder for missing names — and comparing
+    --- that placeholder to nil RAISES (probed), so existence is classified
+    --- from the call's error text, the way bg3_osiris_functions probe does:
+    --- "attempt to call a nil value" means missing, any other error means
+    --- the name exists but the call failed.
+    api.Osi = function(name, ...)
+        local results = table.pack(pcall(function(...)
+            return Osi[name](...)
+        end, ...))
+        if not results[1] then
+            local errText = tostring(results[2])
+            local missing = string.find(errText, "attempt to call a nil value", 1, true) ~= nil
+            return { exists = not missing, ok = false, err = errText }
+        end
+        local values = {}
+        for i = 2, results.n do
+            values[i - 1] = Bridge.describe(results[i])
+        end
+        return { exists = true, ok = true, count = #values, values = values, result = values[1] }
+    end
+
+    api.Try = function(fn, ...)
+        local results = table.pack(pcall(fn, ...))
+        if not results[1] then
+            return { ok = false, err = tostring(results[2]) }
+        end
+        local values = {}
+        for i = 2, results.n do
+            values[i - 1] = Bridge.describe(results[i])
+        end
+        return { ok = true, count = #values, values = values, result = values[1] }
+    end
+
+    --- Best-effort multi-field return (field notes #2): one throwing field
+    --- must not discard the rest of the cell.
+    api.Fields = function(fns)
+        if type(fns) ~= "table" then
+            error("Bridge.Fields expects a table of field-name to function")
+        end
+        local out = {}
+        for name, fn in pairs(fns) do
+            if type(fn) == "function" then
+                out[tostring(name)] = api.Try(fn)
+            else
+                out[tostring(name)] = { ok = false, err = "not a function" }
+            end
+        end
+        return out
+    end
+
+    api.EntityFromHandle = entityFromHandle
+
+    api.Inspect = function(value, depth)
+        return inspectValue(value, tonumber(depth) or 3, nil)
+    end
+
+    --- Direct dispatch to a bridge op's handler (the same op names the MCP
+    --- tools send). Handy for trying experimental handlers from eval; ops
+    --- that answer on the deferred path (pollUntil/captureMs windows) are
+    --- rejected, since their reply would go nowhere.
+    api.Call = function(op, params)
+        local handler = Bridge.Handlers[op]
+        if handler == nil then
+            error("unknown op: " .. tostring(op))
+        end
+        local ok, result = pcall(handler, params or {})
+        if not ok then
+            error(tostring(result))
+        end
+        if result == Bridge.DEFERRED then
+            error("op '" .. tostring(op) .. "' answers deferred (pollUntil/captureMs) and cannot run through Bridge.Call")
+        end
+        return result
+    end
+
+    return api
 end
 
 --- Build the per-call environment for an eval chunk. Raises when modContext
@@ -2258,6 +2509,10 @@ local function buildEvalEnv(prints, modFolder)
         env.PersistentVars = mod.PersistentVars
         env.ModuleUUID = mod.ModuleUUID
     end
+
+    -- The Bridge helper surface (Scratch/Osi/Try/Fields/Call/handles) —
+    -- state lives on the bridge itself, so it persists across calls.
+    env.Bridge = buildBridgeApi()
 
     return setmetatable(env, { __index = shared, __newindex = shared })
 end
@@ -2376,6 +2631,23 @@ H["eval"] = function(params, seq)
         error(tostring(returned[2]))
     end
 
+    -- A live component dumped whole dies at Ext.Json's depth limit and
+    -- would turn the whole cell into a serialization failure (field notes
+    -- #5). Degrade to Bridge.Inspect snapshots instead: scalars first,
+    -- depth-capped, never raises.
+    -- Probe with headroom for the response envelope: the mailbox walks
+    -- result.values[i] several levels deeper than a bare encode of `values`
+    -- does, so a probe at the bare depth can pass while the real reply dies.
+    local _, encodeReason = Bridge.encode(values, Bridge.DEFAULT_MAX_DEPTH - 4)
+    if encodeReason ~= nil then
+        local snapshots = {}
+        for i = 1, #values do
+            snapshots[i] = inspectValue(values[i], 3, nil)
+        end
+        result.values = snapshots
+        result.degraded = "results exceeded serialization depth; re-encoded as Bridge.Inspect snapshots (depth 3)"
+    end
+
     -- No deferred work requested: answer synchronously, as before.
     if not hasPoll and captureMs <= 0 then
         restoreUtilsPrint()
@@ -2468,9 +2740,18 @@ H["entity.get"] = function(params)
         error("params.id is required (an entity UUID or handle)")
     end
 
-    local entity = Ext.Entity.Get(id)
+    -- Ext.Entity.Get RAISES on strings that are not GUID-shaped at all
+    -- (e.g. a handle string), so the direct lookup is guarded before the
+    -- handle scan runs.
+    local okGet, entity = pcall(Ext.Entity.Get, id)
+    if not okGet or entity == nil then
+        -- tostring(entity) prints "Entity (02000001000034ae)" — the handle
+        -- form the field notes saw. Resolve it through the entity scan.
+        entity = entityFromHandle(id)
+    end
     if entity == nil then
-        error("no entity found for id: " .. tostring(id))
+        error("no entity found for id: " .. tostring(id)
+            .. ' — a bare/prefixed UUID, or a handle string like "Entity (02000001000034ae)"')
     end
 
     -- A single named component keeps the payload small; the component list is
@@ -2812,6 +3093,15 @@ local function describeCharacter(entity, input)
             host = tostring(value)
         end
     end
+    -- World position, for anchoring position-based tools (effects.near) and
+    -- for teleport distance checks without a separate call.
+    local position = nil
+    if uuid ~= nil then
+        local okP, px, py, pz = pcall(Osi.GetPosition, uuid)
+        if okP and px ~= nil then
+            position = { x = px, y = py, z = pz }
+        end
+    end
 
     return {
         input = input ~= nil and tostring(input) or nil,
@@ -2824,6 +3114,7 @@ local function describeCharacter(entity, input)
         isAvatar = isAvatar,
         isHostControlled = uuid ~= nil and host ~= nil and uuid == host,
         health = healthOf(entity),
+        position = position,
         isDead = osiBool("IsDead", uuid),
         isDowned = osiBool("IsDowned", uuid),
     }
@@ -2831,43 +3122,101 @@ end
 
 --- Resolve a character argument that may be a bare UUID, a prefixed
 --- template-name form, or (as a fallback) a display name, to an entity. An
---- empty/nil id means the host character.
-local function resolveCharacterEntity(id)
+--- empty/nil id means the host character. Every probe tried is collected
+--- into `diagnostics` so a failure answers WHY instead of surfacing as a
+--- bare message (field notes #8: "I couldn't tell you why it failed, only
+--- that it does").
+local function resolveCharacterDetailed(id)
+    local diagnostics = {}
+    local function record(probe, ok, outcome)
+        diagnostics[#diagnostics + 1] = { probe = probe, ok = ok, outcome = outcome }
+    end
+
     if id == nil or id == "" then
         local ok, host = pcall(Osi.GetHostCharacter)
-        if not ok or host == nil then
-            error("no id given and GetHostCharacter is unavailable")
+        local hostText = ok and tostring(host) or (ok and "nil" or tostring(host))
+        record("Osi.GetHostCharacter()", ok and host ~= nil and host ~= "", hostText)
+        if not ok or host == nil or host == "" then
+            return nil, nil, diagnostics
         end
-        return Ext.Entity.Get(tostring(host)), tostring(host)
+        local okG, entity = pcall(Ext.Entity.Get, tostring(host))
+        local found = okG and entity ~= nil
+        record('Ext.Entity.Get("' .. tostring(host) .. '")', found, found and "entity resolved" or (okG and "nil" or tostring(entity)))
+        return found and entity or nil, tostring(host), diagnostics
     end
 
-    -- Ext.Entity.Get accepts both the bare and prefixed forms.
-    local entity = Ext.Entity.Get(id)
-    if entity ~= nil then
-        return entity, id
-    end
+    local wanted = tostring(id)
 
-    -- Fallback: treat id as a display name and scan party members, the small
-    -- set an agent is realistically naming. A full character scan would be far
-    -- more expensive and rarely what "resolve this name" means.
-    local needle = string.lower(tostring(id))
+    -- Ext.Entity.Get accepts both the bare and prefixed template-name forms
+    -- but RAISES on a string that is not a GUID-shaped id at all, so the
+    -- lookup is guarded and the raise becomes a diagnostic row.
+    local okGet, entity = pcall(Ext.Entity.Get, wanted)
+    local found = okGet and entity ~= nil
+    record('Ext.Entity.Get("' .. wanted .. '")', found, found and "entity resolved" or (okGet and "nil" or tostring(entity)))
+    if found then
+        return entity, wanted, diagnostics
+    end
     local ok, rows = pcall(function()
         return Osi.DB_Players:Get(nil)
     end)
+    local rowCount = (ok and type(rows) == "table") and #rows or 0
+    record("Osi.DB_Players:Get(nil)", ok and type(rows) == "table", ok and (tostring(rowCount) .. " rows") or tostring(rows))
+
     if ok and type(rows) == "table" then
+        local needle = string.lower(wanted)
         for _, row in ipairs(rows) do
             local guid = row[1]
             local candidate = guid ~= nil and Ext.Entity.Get(tostring(guid)) or nil
             if candidate ~= nil then
+                if string.lower(tostring(guid)) == needle then
+                    return candidate, guid, diagnostics
+                end
                 local name = characterDisplayName(candidate)
                 if name ~= nil and string.lower(name) == needle then
-                    return candidate, guid
+                    return candidate, guid, diagnostics
                 end
             end
         end
     end
 
-    error("no character found for id: " .. tostring(id))
+    -- Osiris delivers <Template>_<uuid>; the bare uuid embedded in a
+    -- prefixed form is what compares reliably, so try it as a last resort.
+    local inner = string.match(wanted, "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+    if inner ~= nil and inner ~= wanted then
+        local byBare = Ext.Entity.Get(inner)
+        record('Ext.Entity.Get("' .. inner .. '") (uuid embedded in the prefixed form)', byBare ~= nil, byBare ~= nil and "entity resolved" or "nil")
+        if byBare ~= nil then
+            return byBare, inner, diagnostics
+        end
+    end
+
+    return nil, wanted, diagnostics
+end
+
+--- The player-created Tav, via the AvatarComponent. GetHostCharacter follows
+--- CONTROL (it moves to a companion while the avatar is downed and does not
+--- revert on resurrect), so "who is the player character" is resolved
+--- independently of "who holds control".
+local function findAvatarCharacter()
+    local ok, rows = pcall(function()
+        return Osi.DB_Players:Get(nil)
+    end)
+    if not ok or type(rows) ~= "table" then
+        return nil
+    end
+    for _, row in ipairs(rows) do
+        local candidate = row[1] ~= nil and Ext.Entity.Get(tostring(row[1])) or nil
+        if candidate ~= nil then
+            local isAvatar = false
+            pcall(function()
+                isAvatar = candidate.Avatar ~= nil
+            end)
+            if isAvatar then
+                return candidate, row[1]
+            end
+        end
+    end
+    return nil
 end
 
 H["character.resolve"] = function(params)
@@ -2904,12 +3253,41 @@ H["character.resolve"] = function(params)
         if entity == nil then
             error("host character entity not found: " .. tostring(host))
         end
-        return { action = "host", character = describeCharacter(entity, host) }
+        local character = describeCharacter(entity, host)
+        local response = { action = "host", character = character }
+        -- GetHostCharacter follows control: while the avatar is downed it
+        -- points at whoever holds control. Report both so agents stop
+        -- conflating "who holds control" with "who is the player character".
+        local avatarEntity, avatarGuid = findAvatarCharacter()
+        if avatarEntity ~= nil and (character.uuid == nil or bareUuidOf(avatarEntity) ~= character.uuid) then
+            response.avatar = describeCharacter(avatarEntity, avatarGuid)
+            response.note = "GetHostCharacter follows control — the player-created avatar (isAvatar) is listed separately"
+        end
+        return response
     end
 
     -- resolve (default)
-    local entity, resolvedId = resolveCharacterEntity(params.id)
-    return { action = "resolve", character = describeCharacter(entity, resolvedId) }
+    local entity, resolvedId, diagnostics = resolveCharacterDetailed(params.id)
+    if entity == nil then
+        -- Structured failure instead of a bare error (field notes #8).
+        return {
+            action = "resolve",
+            found = false,
+            id = resolvedId,
+            diagnostics = diagnostics,
+            note = "every lookup probe failed — diagnostics lists what each returned",
+        }
+    end
+
+    local character = describeCharacter(entity, resolvedId)
+    local response = { action = "resolve", found = true, character = character, diagnostics = diagnostics }
+    if character.isAvatar == false then
+        local avatarEntity, avatarGuid = findAvatarCharacter()
+        if avatarEntity ~= nil then
+            response.avatar = describeCharacter(avatarEntity, avatarGuid)
+        end
+    end
+    return response
 end
 
 --- Set HP to a clamped value; returns the value written and the method used.
@@ -3157,4 +3535,657 @@ H["vfs.probe"] = function(params)
         length = #text,
         preview = string.sub(text, 1, 200),
     }
+end
+
+--- Effect auditioning ---------------------------------------------------------
+--
+-- Field notes #3/#4, probed against the live game:
+-- * Osi.PlayEffect(uuid, guid, bone) wants the Effect resource's GUID — the
+--   effect NAME is a silent no-op. These ops resolve the name to a GUID
+--   first and refuse to fire an unresolved name.
+-- * Osi.PlayLoopEffect(uuid, guid, bone, scale) returns a handle for
+--   LOOPING effects; one-shot effects return no handle and stop on their
+--   own after their Duration. StopEffect does not exist; StopLoopEffect
+--   ends a tracked loop (existence probed via bg3_osiris_functions).
+-- * The Effect resource's `Looping` flag picks loop vs one-shot, so the
+--   caller never has to check it.
+-- * Placed/active effect ENTITIES are only enumerable client-side
+--   (H["effects.near"]); the server VM sees none of them.
+
+local activeEffects = {}
+
+--- Resolve an effect name or GUID to matching Effect resources. Exact
+--- (case-insensitive) EffectName or GUID match; an ambiguous query is an
+--- error listing the candidates rather than a silent pick.
+local function resolveEffectResource(query)
+    if type(query) ~= "string" or query == "" then
+        error("params.effect is required — an effect name (e.g. VFX_Status_HoH_Hope_Ghost_BodyFX_01) or its resource GUID")
+    end
+    local lowered = string.lower(query)
+    local okAll, all = pcall(function()
+        return Ext.Resource.GetAll("Effect")
+    end)
+    if not okAll or type(all) ~= "table" then
+        error("could not read the Effect resource bank: " .. tostring(all))
+    end
+
+    local candidates = {}
+    for _, guid in ipairs(all) do
+        local ok, resource = pcall(function()
+            return Ext.Resource.Get(guid, "Effect")
+        end)
+        if ok and resource ~= nil then
+            -- Field reads on a resource proxy can raise (the same proxy
+            -- rules that make component walks need pcalls), so every read
+            -- here is guarded; a resource that refuses is simply skipped.
+            local okFields, name, looping, duration = pcall(function()
+                return resource.EffectName, resource.Looping == true, tonumber(resource.Duration)
+            end)
+            if okFields then
+                local guidText = tostring(guid)
+                if (type(name) == "string" and string.lower(name) == lowered)
+                    or lowered == string.lower(guidText) then
+                    candidates[#candidates + 1] = {
+                        effectName = type(name) == "string" and name or tostring(name),
+                        guid = guidText,
+                        looping = looping == true,
+                        duration = duration,
+                    }
+                end
+            end
+        end
+    end
+    return candidates
+end
+
+H["effect.play"] = function(params)
+    local candidates = resolveEffectResource(params.effect)
+    if #candidates == 0 then
+        error("no Effect resource matches '" .. tostring(params.effect) .. "' — find names with bg3_find_resource (type=Effect)")
+    end
+    if #candidates > 1 then
+        local names = {}
+        for _, candidate in ipairs(candidates) do
+            names[#names + 1] = tostring(candidate.effectName)
+        end
+        error("effect '" .. tostring(params.effect) .. "' matches " .. #candidates
+            .. " resources — pass the exact EffectName or GUID: " .. table.concat(names, ", "))
+    end
+    local effect = candidates[1]
+
+    local character = params.character
+    if type(character) ~= "string" or character == "" then
+        character = Osi.GetHostCharacter()
+    end
+    if character == nil or character == "" then
+        error("no host character (is a save loaded?) — pass params.character")
+    end
+    local bone = type(params.bone) == "string" and params.bone or "Dummy_Root"
+    local scale = tonumber(params.scale) or 1.0
+
+    local rawHandle = nil
+    if effect.looping then
+        local ok, result = pcall(function()
+            return Osi.PlayLoopEffect(character, effect.guid, bone, scale)
+        end)
+        if not ok then
+            error("Osi.PlayLoopEffect failed: " .. tostring(result))
+        end
+        rawHandle = result
+    else
+        local ok, result = pcall(function()
+            return Osi.PlayEffect(character, effect.guid, bone)
+        end)
+        if not ok then
+            error("Osi.PlayEffect failed: " .. tostring(result))
+        end
+        rawHandle = result
+    end
+
+    -- Only looping effects return a handle; one-shots have nothing to stop.
+    local tracked = nil
+    if rawHandle ~= nil then
+        tracked = {
+            raw = rawHandle,
+            handle = tostring(rawHandle),
+            character = tostring(character),
+            guid = effect.guid,
+            effectName = effect.effectName,
+            bone = bone,
+        }
+        activeEffects[#activeEffects + 1] = tracked
+    end
+
+    return {
+        played = true,
+        effect = effect.effectName,
+        guid = effect.guid,
+        looping = effect.looping,
+        duration = effect.duration,
+        character = tostring(character),
+        bone = bone,
+        handle = tracked ~= nil and tracked.handle or nil,
+        tracked = #activeEffects,
+        note = effect.looping
+            and "looping effect — end it with bg3_stop_effect (handle above) before bg3_reload; a reset loses the raw handle"
+            or "one-shot effect: no handle to stop, it burns out after ~" .. tostring(effect.duration) .. "s",
+    }
+end
+
+H["effect.stop"] = function(params)
+    local action = params.action or "stop"
+
+    if action == "list" then
+        local listed = {}
+        for _, entry in ipairs(activeEffects) do
+            listed[#listed + 1] = {
+                handle = entry.handle,
+                character = entry.character,
+                effect = entry.effectName,
+                guid = entry.guid,
+                bone = entry.bone,
+            }
+        end
+        return { tracked = #listed, active = listed }
+    end
+
+    local function stopEntry(entry)
+        local ok, err = pcall(function()
+            Osi.StopLoopEffect(entry.raw)
+        end)
+        return {
+            handle = entry.handle,
+            effect = entry.effectName,
+            character = entry.character,
+            stopped = ok,
+            err = ok and nil or tostring(err),
+        }
+    end
+
+    if action == "clear" then
+        local results = {}
+        for _, entry in ipairs(activeEffects) do
+            results[#results + 1] = stopEntry(entry)
+        end
+        activeEffects = {}
+        return { cleared = #results, results = results }
+    end
+
+    if action ~= "stop" then
+        error("unknown action: " .. tostring(action) .. " (expected stop, clear or list)")
+    end
+
+    if type(params.handle) == "string" and params.handle ~= "" then
+        local results = {}
+        for index, entry in ipairs(activeEffects) do
+            if entry.handle == params.handle then
+                results[#results + 1] = stopEntry(entry)
+                table.remove(activeEffects, index)
+                return { stopped = #results, results = results }
+            end
+        end
+        error("no tracked looping effect with handle " .. tostring(params.handle)
+            .. " — a bg3_reload loses the raw handles; use action=clear before reloading")
+    end
+
+    if type(params.character) == "string" and params.character ~= "" then
+        local results = {}
+        local kept = {}
+        for _, entry in ipairs(activeEffects) do
+            if entry.character == params.character then
+                results[#results + 1] = stopEntry(entry)
+            else
+                kept[#kept + 1] = entry
+            end
+        end
+        activeEffects = kept
+        return { stopped = #results, results = results }
+    end
+
+    error("params.handle or params.character is required — or action=clear / action=list")
+end
+
+H["effects.near"] = function(params)
+    if Bridge.context ~= "client" then
+        error("effects.near enumerates CLIENT-side effect entities — the server VM sees none; call it with context=client")
+    end
+
+    local ok, entities = pcall(Ext.Entity.GetAllEntitiesWithComponent, "Effect")
+    if not ok or type(entities) ~= "table" then
+        error("could not enumerate Effect entities: " .. tostring(entities))
+    end
+
+    local anchor = params.position
+    if type(anchor) ~= "table" or tonumber(anchor.x) == nil then
+        error("params.position {x, y, z} is required — bg3_resolve_character reports a character's position")
+    end
+    local ax, ay, az = tonumber(anchor.x), tonumber(anchor.y), tonumber(anchor.z)
+    if ax == nil or ay == nil or az == nil then
+        error("params.position must carry numeric x, y and z")
+    end
+    local radius = tonumber(params.radius) or 20.0
+    local limit = math.floor(tonumber(params.limit) or 50)
+    if limit < 1 then
+        limit = 1
+    elseif limit > 500 then
+        limit = 500
+    end
+
+    local effects = {}
+    for _, entity in ipairs(entities) do
+        local okN, name = pcall(function()
+            return tostring(entity.Effect.EffectName)
+        end)
+        if okN and name ~= nil and name ~= "" then
+            local okP, x, y, z = pcall(function()
+                local t = entity.Transform.Transform.Translate
+                return t[1], t[2], t[3]
+            end)
+            if okP and x ~= nil then
+                local dx, dy, dz = x - ax, y - ay, z - az
+                local distance = math.sqrt(dx * dx + dy * dy + dz * dz)
+                if distance <= radius then
+                    local row = {
+                        effectName = name,
+                        position = { x = x, y = y, z = z },
+                        distance = math.floor(distance * 100) / 100,
+                    }
+                    local okG, guid = pcall(function()
+                        return tostring(entity.Effect.EffectResource.Guid)
+                    end)
+                    if okG then
+                        row.guid = guid
+                    end
+                    local okA, attached = pcall(function()
+                        return tostring(entity.Effect.Entity)
+                    end)
+                    if okA then
+                        row.attachedEntity = attached
+                    end
+                    effects[#effects + 1] = row
+                end
+            end
+        end
+    end
+
+    table.sort(effects, function(a, b)
+        return a.distance < b.distance
+    end)
+    while #effects > limit do
+        table.remove(effects)
+    end
+
+    return { count = #effects, scanned = #entities, radius = radius, effects = effects }
+end
+
+--- Teleporting and levels -------------------------------------------------------
+--
+-- Field notes #6, probed against the live game:
+-- * The playable level name is the LEVEL FOLDER name
+--   (Data/Editor/Mods/<Module>/Levels/<name>, e.g. BGO_HouseOfHope_C) —
+--   NOT the region/trigger name (LOW_HouseOfHope2): teleporting by that
+--   "succeeds" and drops the party into an unloaded blue void.
+-- * There is no GetHostLevel/GetCurrentLevel (probed); Osi.GetRegion(host)
+--   is the reliable "where am I" and returns exactly the level name above.
+-- * TeleportPartiesToLevelWithMovie returns immediately and the level
+--   streams in over ~15-25s, so confirmation is a POLLED GetRegion, never
+--   the call's return value. Exactly 3 arguments (level, event, movie);
+--   empty strings are fine.
+
+H["level.current"] = function()
+    local host = Osi.GetHostCharacter()
+    if host == nil or host == "" then
+        error("no host character (is a save loaded?)")
+    end
+    local ok, region = pcall(Osi.GetRegion, host)
+    if not ok or region == nil or region == "" then
+        error("Osi.GetRegion returned nothing for the host character")
+    end
+    return {
+        region = tostring(region),
+        host = tostring(host),
+        note = "this is the level name TeleportPartiesToLevelWithMovie expects (the Data/Editor/Mods/<Module>/Levels/<name> folder name)",
+    }
+end
+
+--- Non-party characters with a real position within `radiusM` of the host,
+--- split into those with a display/template name and those without.
+---
+--- Deliberately informational only: level entry areas are legitimately
+--- quiet — the Lower City's Wyrm's Crossing landing has no NPCs within 40 m
+--- while the town streets do (confirmed by walking, 2026-08-30) — so a zero
+--- here does NOT mean the level is hollow. The one clear void case was a
+--- pre-debug-chain House-of-Hope teleport that rendered as a blue void;
+--- after the DBG_Act3_Setup chain the same level rendered fully.
+--- Note also that position reads mid-load can be stale (the party can look
+--- "teleported back" to the previous level for a beat after arrival).
+local function populationNear(uuid, radiusM)
+    local okHost, hx, hy, hz = pcall(Osi.GetPosition, uuid)
+    if not okHost or hx == nil then
+        return nil
+    end
+    local ents = Ext.Entity.GetAllEntitiesWithComponent("ServerCharacter")
+    if type(ents) ~= "table" then
+        return nil
+    end
+    local okP, rows = pcall(function()
+        return Osi.DB_Players:Get(nil)
+    end)
+    local party = {}
+    if okP and type(rows) == "table" then
+        for _, row in ipairs(rows) do
+            local s = string.lower(tostring(row[1]))
+            party[s] = true
+            local bare = string.match(s, "%x%x%x%x%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%-%x%x%x%x%x%x%x%x%x%x%x%x$")
+            if bare ~= nil then
+                party[bare] = true
+            end
+        end
+    end
+    local nearby, named = 0, 0
+    for _, e in ipairs(ents) do
+        local okU, u = pcall(function()
+            return string.lower(tostring(e.Uuid.EntityUuid))
+        end)
+        if okU and u ~= nil and not party[u] then
+            local okPos, x, y, z = pcall(function()
+                local t = e.Transform.Transform.Translate
+                return t[1], t[2], t[3]
+            end)
+            if okPos and x ~= nil then
+                local dx, dy, dz = x - hx, y - hy, z - hz
+                if dx * dx + dy * dy + dz * dz < radiusM * radiusM then
+                    nearby = nearby + 1
+                    pcall(function()
+                        local n = tostring(e.DisplayName.Name:Get())
+                        if n ~= "" then
+                            named = named + 1
+                        end
+                    end)
+                end
+            end
+        end
+    end
+    return { nearby = nearby, named = named }
+end
+
+H["teleport"] = function(params, seq)
+    local level = params.level
+    if type(level) ~= "string" or level == "" then
+        error("params.level is required — the playable level name (e.g. BGO_HouseOfHope_C), NOT the region/trigger name")
+    end
+
+    local host = Osi.GetHostCharacter()
+    if host == nil or host == "" then
+        error("no host character (is a save loaded?)")
+    end
+
+    local before = nil
+    local okB, regionB = pcall(Osi.GetRegion, host)
+    if okB then
+        before = tostring(regionB)
+    end
+
+    local okT, err = pcall(function()
+        return Osi.TeleportPartiesToLevelWithMovie(level, "", "")
+    end)
+    if not okT then
+        error("TeleportPartiesToLevelWithMovie failed: " .. tostring(err))
+    end
+
+    if params.confirm == false then
+        return {
+            requested = level,
+            regionBefore = before,
+            confirmed = false,
+            note = "confirm=false: the call returned; the level streams in asynchronously — verify with level.current",
+        }
+    end
+
+    -- Poll GetRegion until it names the target or the window closes; the
+    -- reply rides the deferred path while the level loads.
+    local timeoutMs = clampNumber(params.timeoutMs, 40000, 3000, 120000)
+    local attempts = 0
+    local started = monotonicMs()
+
+    local function elapsed()
+        local now = monotonicMs()
+        if now ~= nil and started ~= nil then
+            return math.max(0, math.floor(now - started))
+        end
+        return nil
+    end
+
+    local function settle(confirmed, region)
+        local population = confirmed and populationNear(host, 40.0) or nil
+        local note
+        if not confirmed then
+            note = "no region change to '" .. level .. "' within the window — the load may still be streaming; verify with level.current"
+        elseif population ~= nil and population.named == 0 then
+            note = "party region is now " .. tostring(region)
+                .. ", and no named characters are within 40 m of the arrival point — informational only: level entry "
+                .. "areas are often legitimately quiet (the Lower City's landing zone has none nearby while the town "
+                .. "streets do), so scan outward or walk before concluding the level is empty"
+        else
+            note = "party region is now " .. tostring(region)
+        end
+        Bridge.Respond(seq, true, {
+            requested = level,
+            regionBefore = before,
+            regionAfter = region,
+            confirmed = confirmed,
+            attempts = attempts,
+            elapsedMs = elapsed(),
+            population = population,
+            note = note,
+        })
+    end
+
+    local function poll()
+        attempts = attempts + 1
+        local okR, region = pcall(Osi.GetRegion, host)
+        local current = okR and tostring(region) or nil
+        if current ~= nil and current == level then
+            settle(true, current)
+            return
+        end
+        local now = monotonicMs()
+        if now ~= nil and started ~= nil and (now - started) >= timeoutMs then
+            settle(false, current)
+            return
+        end
+        Ext.Timer.WaitFor(500, poll)
+    end
+
+    poll()
+    return Bridge.DEFERRED
+end
+
+--- Story flags ----------------------------------------------------------------
+--
+-- Semantics probed live — the hard way (see the README's arity-trap note):
+-- * Runtime flag names are "<StaticName>_<ResourceUUID>"; the static entry's
+--   Name is only the short form. These tools accept either.
+-- * SetFlag/ClearFlag want exactly 4 arguments (flag, objectGuid, 0, 1) —
+--   the 2-arity form binds and SILENTLY NO-OPS. GetFlag is 2-arity.
+-- * The object must be a real character: the zero-GUID object no-ops even
+--   for global-ish debug flags, and object-bound flags return NO ROW for a
+--   zero-GUID GetFlag query. The host works for everything probed.
+-- * An unset flag reads 0; a set flag reads 1 on its object.
+
+local flagCache = nil
+
+local function flagEntries()
+    if flagCache ~= nil then
+        return flagCache
+    end
+    local ok, guids = pcall(function()
+        return Ext.StaticData.GetAll("Flag")
+    end)
+    if not ok or type(guids) ~= "table" then
+        error("could not read the Flag static data: " .. tostring(guids))
+    end
+    local entries = {}
+    for _, guid in ipairs(guids) do
+        local okGet, entry = pcall(function()
+            return Ext.StaticData.Get(guid, "Flag")
+        end)
+        if okGet and entry ~= nil then
+            local short = tostring(entry.Name)
+            entries[#entries + 1] = {
+                short = short,
+                runtime = short .. "_" .. tostring(guid),
+                guid = tostring(guid),
+                usage = tonumber(entry.Usage),
+                description = tostring(entry.Description or ""),
+            }
+        end
+    end
+    flagCache = entries
+    return entries
+end
+
+--- Resolve a flag argument to its runtime name: exact runtime form, exact
+--- short form, then a case-insensitive substring match — auto-picked only
+--- when it is unambiguous, otherwise an error listing the candidates.
+local function resolveFlag(query)
+    if type(query) ~= "string" or query == "" then
+        error("params.flag is required — the full runtime name (Name_Guid) or the static short name; action=find searches")
+    end
+    local lowered = string.lower(query)
+    local entries = flagEntries()
+    for _, entry in ipairs(entries) do
+        if string.lower(entry.runtime) == lowered then
+            return entry
+        end
+    end
+    for _, entry in ipairs(entries) do
+        if string.lower(entry.short) == lowered then
+            return entry
+        end
+    end
+    local candidates = {}
+    for _, entry in ipairs(entries) do
+        if string.find(string.lower(entry.short), lowered, 1, true)
+            or string.find(string.lower(entry.runtime), lowered, 1, true) then
+            candidates[#candidates + 1] = entry
+        end
+    end
+    if #candidates == 1 then
+        return candidates[1]
+    end
+    local names = {}
+    for i, entry in ipairs(candidates) do
+        if i >= 12 then
+            names[#names + 1] = "…"
+            break
+        end
+        names[#names + 1] = entry.runtime
+    end
+    error("flag '" .. query .. "' matches " .. #candidates .. " entries — pass the full runtime name: " .. table.concat(names, ", "))
+end
+
+local function resolveFlagTarget(params)
+    local character = params.character
+    if type(character) ~= "string" or character == "" then
+        character = Osi.GetHostCharacter()
+    end
+    if character == nil or character == "" then
+        error("no host character (is a save loaded?) — pass params.character")
+    end
+    return tostring(character)
+end
+
+H["flag"] = function(params)
+    local action = params.action or "find"
+
+    if action == "find" then
+        local query = params.query
+        if type(query) ~= "string" or query == "" then
+            error("params.query is required — e.g. 'GaveBodyToIncubus', 'DBG_Act3', 'Act3'")
+        end
+        local lowered = string.lower(query)
+        local entries = flagEntries()
+        local results, matched = {}, 0
+        local target = nil
+        pcall(function()
+            target = resolveFlagTarget(params)
+        end)
+        for _, entry in ipairs(entries) do
+            if string.find(string.lower(entry.short), lowered, 1, true)
+                or string.find(string.lower(entry.runtime), lowered, 1, true)
+                or string.find(string.lower(entry.description), lowered, 1, true) then
+                matched = matched + 1
+                if #results < 50 then
+                    local row = {
+                        flag = entry.runtime,
+                        short = entry.short,
+                        guid = entry.guid,
+                        usage = entry.usage,
+                        description = entry.description,
+                    }
+                    if target ~= nil then
+                        local okRead, read = pcall(function()
+                            return Osi.GetFlag(entry.runtime, target)
+                        end)
+                        row.set = okRead and read == 1
+                    end
+                    results[#results + 1] = row
+                end
+            end
+        end
+        return { query = query, matched = matched, returned = #results, flags = results }
+    end
+
+    local entry = resolveFlag(params.flag)
+    local target = resolveFlagTarget(params)
+
+    if action == "get" then
+        local okRead, value = pcall(function()
+            return Osi.GetFlag(entry.runtime, target)
+        end)
+        if not okRead then
+            error("GetFlag failed: " .. tostring(value))
+        end
+        return { flag = entry.runtime, character = target, set = value == 1 }
+    end
+
+    if action == "set" or action == "clear" then
+        local verb = action == "set" and "SetFlag" or "ClearFlag"
+        local okCall, err = pcall(function()
+            Osi[verb](entry.runtime, target, 0, 1)
+        end)
+        if not okCall then
+            error(verb .. " failed: " .. tostring(err))
+        end
+        -- Verify rather than trust: the wrong-arity and wrong-object forms
+        -- both bind and silently do nothing (probed).
+        local okRead, value = pcall(function()
+            return Osi.GetFlag(entry.runtime, target)
+        end)
+        local isSet = okRead and value == 1
+        if action == "set" and not isSet then
+            return {
+                action = action,
+                flag = entry.runtime,
+                character = target,
+                set = false,
+                verified = false,
+                note = "SetFlag bound but the readback is not 1 — the silent no-op form; the object must be a real character (the zero GUID does nothing)",
+            }
+        end
+        if action == "clear" and isSet then
+            return {
+                action = action,
+                flag = entry.runtime,
+                character = target,
+                cleared = false,
+                verified = false,
+                note = "ClearFlag bound but the flag still reads 1",
+            }
+        end
+        return { action = action, flag = entry.runtime, character = target, set = isSet, verified = true }
+    end
+
+    error("unknown action: " .. tostring(action) .. " (expected find, get, set or clear)")
 end

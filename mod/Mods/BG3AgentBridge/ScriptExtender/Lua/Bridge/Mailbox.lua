@@ -9,6 +9,16 @@ local Bridge = BG3AgentBridge
 local tickCounter = 0
 local lastSeq = -1
 
+local function monotonicTime()
+    local ok, value = pcall(function()
+        return Ext.Timer.MonotonicTime()
+    end)
+    if ok and type(value) == "number" then
+        return value
+    end
+    return nil
+end
+
 local function readRequest()
     local raw = Ext.IO.LoadFile(Bridge.paths_.request)
     if raw == nil or raw == "" then
@@ -84,7 +94,19 @@ local function dispatch(request)
 
     -- Handlers get the sequence number as a second argument: only deferred
     -- responders need it, and existing handlers ignore it.
+    local started = monotonicTime()
     local ok, result = pcall(handler, request.params or {}, seq)
+    local took = nil
+    if started ~= nil then
+        local now = monotonicTime()
+        if now ~= nil then
+            took = math.max(0, math.floor(now - started))
+        end
+    end
+    if Bridge.stats ~= nil then
+        Bridge.stats.dispatched = Bridge.stats.dispatched + 1
+        Bridge.stats.lastDispatchMs = took
+    end
     if ok and result == Bridge.DEFERRED then
         return
     end
@@ -127,6 +149,11 @@ function Bridge.Start(context)
     Bridge.paths_ = Bridge.paths(context)
     Bridge.capabilities = Bridge.probeCapabilities()
     Bridge.pendingReset = false
+    Bridge.stats = {
+        startedAt = monotonicTime(),
+        dispatched = 0,
+        lastDispatchMs = nil,
+    }
 
     -- Ext.Debug.Reset re-runs bootstrap against the same on-disk mailbox. Seed
     -- the cursor from whatever request is already there so a completed command
