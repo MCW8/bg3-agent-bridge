@@ -1,17 +1,17 @@
 #!/usr/bin/env node
 /**
- * Packs the companion mod into a .pak and drops it in the BG3 Mods directory.
- *
- * Deliberately does not touch modsettings.lsx. Rewriting a load order in place
- * is the single easiest way to break someone's install, so enabling the mod
- * stays a manual step in whatever mod manager they already trust.
+ * Builds BG3AgentBridge.pak next to the executable (repo root under Node).
+ * This is the artifact `bg3-bridge install` ships into the game and the one
+ * included in the release zip — end users never need divine; whoever builds
+ * a release does.
  */
+
 import { spawnSync } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { MOD_FOLDER, modsDir } from '../paths.js';
+import { MOD_FOLDER } from '../paths.js';
 import { packageRoot, ranDirectly } from '../runtime.js';
 
 const workspace = path.join(packageRoot(), 'mod');
@@ -92,7 +92,7 @@ export function main(): number {
         return 1;
     }
 
-    const destination = path.join(modsDir(), `${MOD_FOLDER}.pak`);
+    const destination = path.join(packageRoot(), `${MOD_FOLDER}.pak`);
     if (existsSync(destination) && !force) {
         console.error(`${destination} already exists. Re-run with --force to overwrite it.`);
         return 1;
@@ -118,9 +118,9 @@ export function main(): number {
     }
 
     console.log(
-        `\nPacked ${MOD_FOLDER}.pak.\n\n` +
+        `\nPacked ${destination}\n\n` +
             'Next steps:\n' +
-            '  1. Enable "BG3 Agent Bridge" in your mod manager and export the load order.\n' +
+            '  1. `bg3-bridge install` ships this pak into the game (no divine needed).\n' +
             '  2. Launch the game and load a save.\n' +
             '  3. Run the bg3_bridge_status tool to confirm the bridge answers.\n',
     );

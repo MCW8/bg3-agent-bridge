@@ -16,7 +16,7 @@ import { copyFileSync, cpSync, existsSync, mkdirSync, readFileSync, readdirSync,
 import { homedir } from 'node:os';
 import path from 'node:path';
 
-import { MOD_FOLDER } from '../paths.js';
+import { MOD_FOLDER, modsDir } from '../paths.js';
 import { isCompiledExe, mcpServerEntry, packageRoot, ranDirectly } from '../runtime.js';
 
 const MOD_NAME = 'BG3 Agent Bridge';
@@ -24,6 +24,12 @@ const MOD_UUID = 'b0636853-9a7e-4fe9-b78c-1ff567ac2265';
 const MOD_VERSION64 = '36028797018963968';
 
 const modSource = path.join(packageRoot(), 'mod', 'Mods', MOD_FOLDER);
+
+/**
+ * The prebuilt pak ships next to the executable in the release zip; under
+ * Node it is built to the repo root by `bg3-bridge pack` (divine/LSLib).
+ */
+const pakSource = path.join(packageRoot(), `${MOD_FOLDER}.pak`);
 
 const localAppData = process.env.LOCALAPPDATA ?? path.join(homedir(), 'AppData', 'Local');
 const larianDir = path.join(localAppData, 'Larian Studios', "Baldur's Gate 3");
@@ -180,6 +186,7 @@ function checkNodeVersion(): void {
 
 export interface InstallResult {
     uninstall: boolean;
+    flavor: 'pak' | 'loose';
     gameDir: string;
     target: string;
     copied: number | null;
@@ -187,14 +194,10 @@ export interface InstallResult {
     backupPath: string | null;
 }
 
-/**
- * Do the install (or uninstall) and return what happened, throwing on failure.
- * Kept free of console output so both the CLI and the setup wizard can present
- * the result their own way.
- */
-export function performInstall(opts: { uninstall?: boolean } = {}): InstallResult {
+export function performInstall(opts: { uninstall?: boolean; flavor?: 'pak' | 'loose' } = {}): InstallResult {
     checkNodeVersion();
     const uninstall = opts.uninstall === true;
+    const flavor = opts.flavor ?? 'pak';
 
     if (gameIsRunning()) {
         fail(
@@ -205,29 +208,54 @@ export function performInstall(opts: { uninstall?: boolean } = {}): InstallResul
     }
 
     const gameDir = findGameDir();
-    const target = path.join(gameDir, 'Data', 'Mods', MOD_FOLDER);
+    const looseTarget = path.join(gameDir, 'Data', 'Mods', MOD_FOLDER);
+    const pakTarget = path.join(modsDir(), `${MOD_FOLDER}.pak`);
 
     if (uninstall) {
-        if (existsSync(target)) rmSync(target, { recursive: true, force: true });
+        // Both flavors: an install history can have left either (or both).
+        if (existsSync(looseTarget)) rmSync(looseTarget, { recursive: true, force: true });
+        if (existsSync(pakTarget)) rmSync(pakTarget, { force: true });
         const result = updateModsettings({ remove: true });
-        return { uninstall: true, gameDir, target, copied: null, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
+        return { uninstall: true, flavor, gameDir, target: pakTarget, copied: null, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
     }
 
-    if (!existsSync(modSource)) fail(`Mod source missing at ${modSource}`);
+    if (flavor === 'pak' && !existsSync(pakSource)) {
+        fail(
+            `No prebuilt pak at:\n    ${pakSource}\n\n` +
+                '  The release zip ships it next to bg3-bridge.exe. To rebuild it:\n' +
+                '    bg3-bridge pack            (needs LSLib\\Divine; set BG3_DIVINE_PATH)\n' +
+                '  Or install the loose development copy instead:\n' +
+                '    bg3-bridge install --loose',
+        );
+    }
 
-    mkdirSync(path.dirname(target), { recursive: true });
-    rmSync(target, { recursive: true, force: true });
-    cpSync(modSource, target, { recursive: true });
-
-    const copied = readdirSync(target, { recursive: true }).length;
     const result = updateModsettings({ remove: false });
-    return { uninstall: false, gameDir, target, copied, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
+
+    if (flavor === 'pak') {
+        // One flavor at a time: the game serves a pak over loose files, so a
+        // leftover loose folder would be shadowed invisibly (and bg3_reload
+        // would keep re-reading the pak's Lua, confusing the edit loop).
+        if (existsSync(looseTarget)) rmSync(looseTarget, { recursive: true, force: true });
+        copyFileSync(pakSource, pakTarget);
+        return { uninstall: false, flavor, gameDir, target: pakTarget, copied: null, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
+    }
+
+    // Loose (development) flavor: the mirror-image cutover, so a leftover pak
+    // cannot win over the hot-reloadable loose files.
+    if (existsSync(pakTarget)) rmSync(pakTarget, { force: true });
+    if (!existsSync(modSource)) fail(`Mod source missing at ${modSource}`);
+    mkdirSync(path.dirname(looseTarget), { recursive: true });
+    rmSync(looseTarget, { recursive: true, force: true });
+    cpSync(modSource, looseTarget, { recursive: true });
+    const copied = readdirSync(looseTarget, { recursive: true }).length;
+    return { uninstall: false, flavor, gameDir, target: looseTarget, copied, modsettingsNote: result.note, backupPath: result.backupPath ?? null };
 }
 
 /**
  * Read-only check of whether the mod is already installed, for the setup wizard
  * to decide between installing and offering to uninstall. Never throws — a game
- * it cannot find just reports not-installed.
+ * it cannot find just reports not-installed. Either flavor counts: the wizard
+ * manages the install whichever way a previous version put it there.
  */
 export function installStatus(): { gameDir: string | null; installed: boolean } {
     let gameDir: string;
@@ -236,24 +264,33 @@ export function installStatus(): { gameDir: string | null; installed: boolean } 
     } catch {
         return { gameDir: null, installed: false };
     }
-    return { gameDir, installed: existsSync(path.join(gameDir, 'Data', 'Mods', MOD_FOLDER)) };
+    return {
+        gameDir,
+        installed:
+            existsSync(path.join(gameDir, 'Data', 'Mods', MOD_FOLDER)) ||
+            existsSync(path.join(modsDir(), `${MOD_FOLDER}.pak`)),
+    };
 }
-
 /** The `bg3-bridge install` command: install, then print the config to paste. */
 export function installMod(args: string[]): void {
-    const r = performInstall({ uninstall: args.includes('--uninstall') });
+    const flavor = args.includes('--loose') ? 'loose' : 'pak';
+    const r = performInstall({ uninstall: args.includes('--uninstall'), flavor });
 
     console.log(`  game:  ${r.gameDir}`);
     console.log(`  mod:   ${r.target}`);
 
     if (r.uninstall) {
-        console.log(`\n  Removed loose mod files.`);
+        console.log('\n  Removed the companion mod (pak and loose files, whichever existed).');
         console.log(`  modsettings.lsx: ${r.modsettingsNote}`);
         if (r.backupPath !== null) console.log(`  backup: ${r.backupPath}`);
         return;
     }
 
-    console.log(`\n  Copied ${r.copied} entries.`);
+    if (r.flavor === 'pak') {
+        console.log(`\n  Installed ${path.basename(r.target)} into the game's Mods directory.`);
+    } else {
+        console.log(`\n  Copied ${r.copied} loose entries (dev mode: Lua edits hot-reload with bg3_reload).`);
+    }
     console.log(`  modsettings.lsx: ${r.modsettingsNote}`);
     if (r.backupPath !== null) console.log(`  backup: ${r.backupPath}`);
 

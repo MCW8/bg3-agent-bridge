@@ -21,12 +21,11 @@ import { main as setupMain } from './setup-wizard.js';
 const USAGE = `
   bg3-bridge                  guided setup when double-clicked; the MCP server when launched by an agent
   bg3-bridge setup            guided setup: install on a fresh machine, or reinstall/uninstall
-  bg3-bridge serve            run the MCP server explicitly
-  bg3-bridge install          install the companion mod (--uninstall to remove)
-  bg3-bridge uninstall        remove the companion mod (alias for install --uninstall)
+  bg3-bridge install          install the companion pak into the game (--loose for the hot-reloadable dev copy; --uninstall to remove)
+  bg3-bridge uninstall        remove the companion mod (pak and loose, whichever exists)
   bg3-bridge configure        print the agent MCP config (--list, --write, --path)
   bg3-bridge check            verify the bridge without an agent
-  bg3-bridge pack             build a .pak with divine
+  bg3-bridge pack             build BG3AgentBridge.pak next to the exe (needs LSLib/Divine)
 `;
 
 const [command, ...args] = process.argv.slice(2);

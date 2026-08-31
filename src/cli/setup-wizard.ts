@@ -22,7 +22,11 @@ const RULE = '  ─────────────────────�
 function reportInstalled(result: InstallResult): void {
     console.log(`  game:  ${result.gameDir}`);
     console.log(`  mod:   ${result.target}`);
-    console.log(`\n  Copied ${result.copied} entries.`);
+    console.log(
+        result.flavor === 'pak'
+            ? '\n  Installed BG3AgentBridge.pak into the game\'s Mods directory.'
+            : `\n  Copied ${result.copied} loose entries (dev mode: Lua edits hot-reload with bg3_reload).`,
+    );
     console.log(`  modsettings.lsx: ${result.modsettingsNote}`);
     if (result.backupPath !== null) console.log(`  backup: ${result.backupPath}`);
 
@@ -43,7 +47,7 @@ function reportInstalled(result: InstallResult): void {
 function reportUninstalled(result: InstallResult): void {
     console.log(`  game:  ${result.gameDir}`);
     console.log(`  mod:   ${result.target}`);
-    console.log('\n  Removed the companion mod\'s loose files.');
+    console.log('\n  Removed the companion mod (pak and loose files, whichever existed).');
     console.log(`  modsettings.lsx: ${result.modsettingsNote}`);
     if (result.backupPath !== null) console.log(`  backup: ${result.backupPath}`);
     console.log('\n  Uninstalled. Also remove "bg3-agent-bridge" from your AI agent\'s MCP config.');

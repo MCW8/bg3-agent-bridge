@@ -19,8 +19,8 @@ I wanted to let my AI see into Larian's Toolkit, but the Toolkit has no plugin A
 
 **You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+).
 
-1. **Download and extract** `bg3-agent-bridge-v0.3.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
-2. **Close Baldur's Gate 3, then double-click `bg3-bridge.exe`.** It installs the companion mod and prints a short MCP config block — copy it.
+1. **Download and extract** `bg3-agent-bridge-v0.5.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
+2. **Close Baldur's Gate 3, then double-click `bg3-bridge.exe`.** It installs the packed companion mod and prints a short MCP config block — copy it.
 3. **Paste that block to your AI agent** and ask it to add the server to its MCP config, then restart the agent. Launch BG3, load a save, and ask *"Is the BG3 bridge connected?"* — the agent takes it from there.
 
 <details>
@@ -102,7 +102,7 @@ You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Tho
 
 The fastest path is the [Quick start](#quick-start): double-click `bg3-bridge.exe` for a guided setup that does all of the below. The manual steps here are the same actions, broken out — useful for scripting, headless setups, or when something needs adjusting.
 
-**1. Get the files.** Download `bg3-agent-bridge-v0.3.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod folder — one binary, no runtime to install.
+**1. Get the files.** Download `bg3-agent-bridge-v0.5.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod as a packed `BG3AgentBridge.pak` — one binary, no runtime to install, no mod manager required.
 
 <details>
 <summary>From source instead (needs git, Node 20+, and npm)</summary>
@@ -123,9 +123,9 @@ Every command below then runs under Node instead of the exe: `node scripts/insta
 .\bg3-bridge install
 ```
 
-Finds your BG3 install, copies the companion mod into `Data\Mods\` as loose files, and adds it to `modsettings.lsx` (backed up first; refuses to run while the game is open, because the game rewrites that file from memory on exit). `BG3_GAME_DIR` overrides the install search; `--uninstall` reverses it.
+Finds your BG3 install, copies `BG3AgentBridge.pak` into your `Mods` directory (`%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Mods\` — the same place mod managers put paks), and adds it to `modsettings.lsx` (backed up first; refuses to run while the game is open, because the game rewrites that file from memory on exit). `BG3_GAME_DIR` overrides the install search; `--uninstall` reverses it. Re-running the exe and choosing "Reinstall / update" after downloading a newer version does the same thing, guided.
 
-Loose files rather than a packed `.pak`, deliberately: a pak is read once at startup, so **packed Lua cannot be hot-reloaded**. Loose files apply on the next `bg3_reload`.
+**Development flavor.** `.\bg3-bridge install --loose` copies the mod source into `Data\Mods\` as loose files instead. That is the right shape while working on the bridge itself: a pak is read once at startup, so **packed Lua cannot be hot-reloaded**, while loose files apply on the next `bg3_reload`. Installing either flavor removes the other — the game serves a pak over loose files, and a leftover would silently shadow your edits.
 
 **3. Connect your agent:**
 
@@ -187,7 +187,7 @@ Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character 
 
 </details>
 
-**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 26 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
+**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 27 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
 
 ## Building your own mods
 
@@ -221,7 +221,7 @@ The `examples/` directory has three worked mods — a spell, an item, and a stat
 | `bg3_animation` | Audition any animation, swap locomotion sets (idle+walk+run), or override the idle |
 | `bg3_play_sound` | Fire a sound event to audition it, globally or at a character |
 | `bg3_capture_sounds` | Record which sound events the game actually fires — "what sound was that?" |
-| `bg3_eval` | Run a Lua chunk in the live game — captures prints, can borrow a mod's context, and can poll until a condition holds |
+| `bg3_eval` | Run a Lua chunk in the live game — captures prints, plain globals persist across calls (plus a `Bridge.Scratch` table and `Bridge.Osi`/`Try`/`Fields`/`Call`/`EntityFromHandle`/`Inspect` helpers), can borrow a mod's context, and can poll until a condition holds |
 | `bg3_reload` | Hot-reload the Lua VM via `Ext.Debug.Reset()` — waits for the fresh handshake + ping and reports the outcome by default |
 | `bg3_osiris_functions` | List the Osi function table by name filter, or probe specific names for existence |
 | `bg3_vfs_probe` | Read a path through the game VFS and report the byte length served — tells pak vs loose apart |
@@ -232,8 +232,17 @@ The `examples/` directory has three worked mods — a spell, an item, and a stat
 | `bg3_read_log` | Read the Extender or Osiris log — pick the channel, regex-filter, or follow only new lines via cursor |
 | `bg3_list_logs` | List log files grouped by game session, newest first |
 | `bg3_trace_events` | Capture the ordered stream of Osiris story events, filtered by name and/or entity |
+| `bg3_play_effect` | Play a visual effect by name or GUID — resolves the GUID `Osi.PlayEffect` silently demands and auto-picks looping vs one-shot |
+| `bg3_stop_effect` | Stop looping effects the bridge started, by handle or character |
+| `bg3_effects_near` | List placed/active effects around a character or position, nearest first (client-side truth — the server sees none) |
+| `bg3_teleport` | Move the party to a level, validating the name against the real level list and confirming the region actually changed |
+| `bg3_list_levels` | Every playable level name, per module, from the game's own Editor data — the names `GetRegion` and teleport use |
 
-Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_DIVINE_PATH`.
+Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_GAME_DIR`, `BG3_DIVINE_PATH`.
+
+### Which tool for which layer
+
+BG3 splits its data three ways, and the search tools mirror it. **Resources** (`bg3_find_resource`) are the raw asset bank — sounds, visuals, effects, animations — and give you the GUIDs the engine calls take. **Templates** (`bg3_find_template`) are world objects — items, characters, props — and carry cross-references (stat entry, visual GUID, parent template) one layer up. **Stats and static data** (`bg3_find_stat`, `bg3_find_static_data`) are the behavioural layer — statuses, spells, passives, MultiEffectInfo — and are what your mod's `Stats/` files edit. Work "what did I see → what is it called → what do I reference" in that order; `bg3_find_status_by_effect` jumps from an effect straight to the statuses that apply it. Runtime state (entities, components, live positions) is not any of these layers — that is `bg3_resolve_character`, `bg3_entity_inspect` and `bg3_schema`.
 
 ## Reading logs and tracing events
 
@@ -467,6 +476,8 @@ Measured against SE v32, not assumed:
 
 Checking whether an `Osi` function exists needs `type(Osi.X) ~= "nil"` — entries are userdata, never Lua functions, so `type(Osi.X) == "function"` is false for every one of them: a check that will convince you a working function is missing.
 
+The files this section discusses ship in `ReferenceLua/` next to the executable: the three BG3ModdingTools-generated files (MIT, attributed in `ReferenceLua/`), which `bg3_osiris_functions action=signature` parses, plus an `ExtIdeHelpers_v32.lua` generated by SE on this machine for `Ext.*` coverage. See `ReferenceLua/README.md` for provenance and refresh instructions.
+
 ## Known limits
 
 **`bg3_eval` depends on a capability that is not guaranteed.** `load()` is not *documented* as exposed to mod scripts. The mod probes at boot and reports through `bg3_bridge_status`, so a missing `load` is a clear message, not a silent failure. SE's `load` takes an environment table as its second argument, not a chunk-name string. The structured tools do not depend on any of this.
@@ -495,13 +506,17 @@ Reloading a *save* applies none of these — it re-reads the save, not the modul
 
 **Script Extender's API moves with game patches.** Every capability is probed at runtime rather than assumed, but a large enough patch will still need updates here.
 
+**Story flags: the arity trap.** Runtime flag names are `<StaticName>_<ResourceUUID>` (e.g. `LOW_HouseOfHope_State_GaveBodyToIncubus_54fb1ca4-…` — the static entry's `Name` plus its `Guid`; `bg3_flag action=find` resolves them). `GetFlag` is 2-arity `(flag, objectGuid)`, and object-bound flags return NO ROW for the zero-GUID query — "no row" and "unset" both read as 0. `SetFlag`/`ClearFlag` want exactly 4 arguments: `(flag, objectGuid, dialogInstance, sendFlagSetEventIfChanged)` — the 2-arity overload BINDS and silently no-ops (no FlagSet event, readback unchanged), which reads exactly like "flags are read-only from Lua". The object must be a real character: the host works even for global-ish debug flags, the zero-GUID object does nothing. With that recipe flags set fine — including Larian's own debug jump-start chain (`DBG_Act3_Setup_Good/Neutral/Evil`, `Debug_Teleport_Act3Start`, `END_General_Debug_GoToAct3`, found via `bg3_find_static_data type=Flag query=act3`): setting them made the story set `Act3_Visited` itself, spawn setup actors, and a House-of-Hope teleport then landed in a real, rendering level. Two caveats from the same test: the default entry point can be hostile (the character dropped straight into a chasm — anchor afterwards), and mid-load position reads can be stale (the party briefly looked "teleported back"). `bg3_flag` handles the arity, the name form and the readback verification; a raw `Osi.SetFlag(flag, char, 0, 1)` from eval works too.
+
+**Osiris signatures live in ReferenceLua/.** The Script Extender's generated `Osi.lua` (plus `Osi.Events.lua`, `ExtIdeHelpers.lua`) lists every function's declared parameters and overload arities — the answer to "how many arguments does X take" that probing alone took a session to discover (`SetFlag`'s 4th argument is `sendFlagSetEventIfChanged`). Keep the folder next to `bg3-bridge.exe` (repo root when running from source); `bg3_osiris_functions action=signature names=["SetFlag"]` reads it, and works with the game closed. Without it, the action explains where to put the files. Signatures are the map, not a guarantee — the SE proxy can still reject or silently no-op an overload form, so confirm critical calls with a probe or a real invocation.
+
 ## Troubleshooting
 
 | Symptom | Fix |
 |---|---|
 | "Windows protected your PC" / SmartScreen blocks the exe | It's an unsigned indie binary. Click **More info -> Run anyway**. (Prefer not to? Run it from a terminal instead, or build from source.) |
 | Double-click flashes and closes instantly | The guided setup pauses on "Press Enter to close", so this is rare — if it happens, open a terminal in the folder and run `.\bg3-bridge setup` to see the error. |
-| Agent lists no `bg3_*` tools | The config was not picked up. Re-run `.\bg3-bridge configure --write <client>`, then **fully restart** the agent app — almost none reload config live. The client's server list should show `bg3-agent-bridge` with 26 `bg3_*` tools. |
+| Agent lists no `bg3_*` tools | The config was not picked up. Re-run `.\bg3-bridge configure --write <client>`, then **fully restart** the agent app — almost none reload config live. The client's server list should show `bg3-agent-bridge` with 27 `bg3_*` tools. |
 | `bg3_bridge_status` says both contexts offline | BG3 is not running, or no save is loaded. Launch the game and load a save — the bridge only answers in-game, and the `client` context in particular responds only after a save loads. |
 | `.\bg3-bridge install` finds no game / fails | Close BG3 first (it rewrites `modsettings.lsx` from memory on exit). If your install is not found, set `BG3_GAME_DIR` to your Baldur's Gate 3 folder and re-run. |
 | Installed, but the game ignores the mod | If a packed `Mods\...pak` for it also exists, the game serves the pak and ignores loose files — remove the pak. Make sure "BG3 Agent Bridge" is enabled in your mod manager / load order. `bg3_vfs_probe` shows which copy is live. |
