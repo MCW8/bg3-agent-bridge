@@ -10,7 +10,9 @@ import * as z from 'zod';
 
 import { callBridge, readHello, type BridgeContext, type CallOptions } from './mailbox.js';
 import { listLogSessions, tailLog } from './logs.js';
+import { findGameDir, listLevels } from './levels.js';
 import { bridgeDir, logDirectories, mailboxPaths } from './paths.js';
+import { loadOsirisReference, osirisReferenceAvailable } from './osirisRef.js';
 import { ranDirectly } from './runtime.js';
 
 /**
@@ -124,6 +126,40 @@ async function bridge(
  */
 let traceCapture: { file: string; cursor: number } | null = null;
 
+
+/**
+ * Validate a teleport target against the real level list before touching
+ * the game: a region/trigger name "succeeds" and drops the party into an
+ * unloaded void (field notes #6). Returns a failure result when the name is
+ * not a known level, null when it validated or no list could be built.
+ */
+async function validateTeleportLevel(level: string): Promise<ToolResult | null> {
+    const gameDir = await findGameDir(false);
+    if (gameDir === null) return null;
+    const scan = await listLevels(gameDir, false);
+    if (scan.levels.length === 0) return null;
+    const lowered = level.toLowerCase();
+    const exact = scan.levels.find((entry) => entry.level.toLowerCase() === lowered);
+    if (exact !== undefined) return null;
+    const suggestions = scan.levels
+        .filter((entry) => entry.level.toLowerCase().includes(lowered))
+        .slice(0, 8)
+        .map((entry) => `${entry.level} (${entry.module})`);
+    return failure(
+        `"${level}" is not a level name in this install — region/trigger names teleport into an unloaded void. ` +
+            (suggestions.length > 0
+                ? `Matching level names: ${suggestions.join(', ')}. Run bg3_list_levels for the full list.`
+                : 'Run bg3_list_levels for the full list of playable level names.'),
+    );
+}
+
+/**
+ * Field notes #7: a rapid burst of Osi.CreateAt calls (21 spawns plus an
+ * animations-table scan) left the server context unresponsive for a while.
+ * Enforce a minimum spacing between spawn calls at the burst source.
+ */
+let lastSpawnAt = 0;
+const SPAWN_MIN_INTERVAL_MS = 300;
 function registerTools(server: McpServer): void {
     defineTool(
         server,
@@ -148,8 +184,21 @@ function registerTools(server: McpServer): void {
 
                 // A handshake file survives the game exiting, so liveness needs a real round trip.
                 try {
-                    await callBridge(context, 'ping', {}, { timeoutMs: 2500 });
-                    report[context] = { online: true, capabilities: hello.capabilities, protocol: hello.protocol };
+                    const pong = await callBridge<{
+                        capabilities?: unknown;
+                        protocol?: number;
+                        uptimeMs?: number;
+                        dispatched?: number;
+                        lastDispatchMs?: number;
+                    }>(context, 'ping', {}, { timeoutMs: 2500 });
+                    report[context] = {
+                        online: true,
+                        capabilities: pong.capabilities,
+                        protocol: pong.protocol,
+                        vmUptimeMs: pong.uptimeMs,
+                        dispatched: pong.dispatched,
+                        lastDispatchMs: pong.lastDispatchMs,
+                    };
                 } catch (error) {
                     report[context] = {
                         online: false,
@@ -266,9 +315,13 @@ function registerTools(server: McpServer): void {
                 'by default 2m from the host character — pass near to anchor to someone else, or x/y/z for an exact spot. ' +
                 'This wraps Osi.CreateAt, whose signature is the trap: it takes exactly 7 arguments ' +
                 '(templateId, x, y, z, temporary, playSpawn, customName) and every shorter form fails with an overload ' +
-                'error that never says the wanted count. Spawned characters are tracked so action=despawn or clear can ' +
-                'remove them; a spawn persists in the save otherwise. ALWAYS clear test spawns when done. Spawning is ' +
-                'server-side, so this tool always targets the server context.',
+                'error that never says the wanted count. The template must be a ROOT template — instance UUIDs (from ' +
+                'DB_Players or Osiris events) and non-root templates are rejected up front, because CreateAt silently ' +
+                'spawns nothing for them; the response reports `confirmed` (whether a live entity exists at the returned ' +
+                'id) and spawns are spaced ~300ms apart because rapid bursts left the server context unresponsive (field ' +
+                'notes #7). Spawned characters are tracked so action=despawn or clear can remove them; a spawn persists ' +
+                'in the save otherwise. ALWAYS clear test spawns when done. Spawning is server-side, so this tool always ' +
+                'targets the server context.',
             inputSchema: z.object({
                 action: z
                     .enum(['spawn', 'despawn', 'clear', 'list'])
@@ -308,9 +361,17 @@ function registerTools(server: McpServer): void {
         // action defaults by intent: a call carrying a template means spawn —
         // the previous unconditional "list" default turned a template-only
         // call into a silent no-op that returned {count: 0, spawned: []}.
-        async ({ action, template, near, offset, x, y, z, name, playSpawn, id }) =>
-            bridge('server', 'character.spawn', {
-                action: action ?? (template !== undefined && template !== '' ? 'spawn' : 'list'),
+        async ({ action, template, near, offset, x, y, z, name, playSpawn, id }) => {
+            // Field notes #7: a rapid burst of spawns left the server context
+            // unresponsive for a while. Space spawns out at the burst source.
+            const resolvedAction = action ?? (template !== undefined && template !== '' ? 'spawn' : 'list');
+            if (resolvedAction === 'spawn') {
+                const waitMs = SPAWN_MIN_INTERVAL_MS - (Date.now() - lastSpawnAt);
+                if (waitMs > 0) await sleep(waitMs);
+                lastSpawnAt = Date.now();
+            }
+            return bridge('server', 'character.spawn', {
+                action: resolvedAction,
                 template,
                 near,
                 offset,
@@ -320,7 +381,8 @@ function registerTools(server: McpServer): void {
                 name,
                 playSpawn,
                 id,
-            }),
+            });
+        },
     );
 
     defineTool(
@@ -613,6 +675,16 @@ function registerTools(server: McpServer): void {
             title: 'Evaluate Lua in the running game',
             description:
                 'Run a Lua chunk inside the live game and return its values. Use `return` to get a value back. ' +
+                'Plain globals PERSIST across eval calls in the same VM (chunks share the shared global table — probed) ' +
+                'and reset on bg3_reload; a reserved Bridge.Scratch table is also available for cross-call state. The ' +
+                'chunk gets a Bridge helper surface: Bridge.Osi(name, ...) returns {exists, ok, err, result} so a failed ' +
+                'Osiris call stops masquerading as success (pcall collapses "missing function", "call raised" and ' +
+                '"returned nil" into ok=true); Bridge.Try(fn) and Bridge.Fields{...} give best-effort multi-field ' +
+                'returns; Bridge.Call(op, params) dispatches a bridge op directly (deferred ops rejected); ' +
+                'Bridge.EntityFromHandle(s) resolves the "Entity (0200…)" handle strings tostring prints back to an ' +
+                'entity; Bridge.Inspect(v, depth) is a depth-capped, never-raising value snapshot. Results that would ' +
+                'die at the JSON depth limit are automatically re-encoded as Bridge.Inspect snapshots (result.degraded) ' +
+                'instead of failing the whole cell. ' +
                 'print/Ext.Utils.Print output emitted during the call is captured and returned as `prints` — no more ' +
                 'eval-then-grep-the-log for diagnostics. The chunk runs in the bridge mod\'s own context: bare ' +
                 '`PersistentVars` is the bridge\'s (nil), so to touch another mod\'s state either use ' +
@@ -687,7 +759,13 @@ function registerTools(server: McpServer): void {
                 'List an entity\'s components, or dump one named component. Omit `component` first to discover what exists, ' +
                 'then request a specific one — full component dumps are large.',
             inputSchema: z.object({
-                id: z.string().min(1).describe('Entity UUID or handle, e.g. a character UUID'),
+                id: z
+                    .string()
+                    .min(1)
+                    .describe(
+                        'Entity UUID (bare or prefixed) or handle — a handle is what tostring(entity) prints, e.g. ' +
+                            '"Entity (02000001000034ae)" or the bare 16-hex-digit form',
+                    ),
                 component: z
                     .string()
                     .optional()
@@ -802,9 +880,11 @@ function registerTools(server: McpServer): void {
                 'Note this resets BOTH the server and client VMs whichever context you target — all in-memory Lua state is lost, ' +
                 'including runtime stat edits made with bg3_stats_set. By default this WAITS for the reload to finish and confirms ' +
                 'it: it records the handshake file\'s timestamp, triggers the reset, waits for Bridge.Start to rewrite that ' +
-                'handshake (the definitive "VM rebooted" signal — no dependence on Script Extender logging being enabled), then ' +
+                "handshake (the definitive \"VM rebooted\" signal — no dependence on Script Extender logging being enabled), then " +
                 'pings the fresh VM and returns {reloaded, rebooted, responsive, durationMs, capabilities}. A syntax error in a ' +
                 'reloaded script stops Bridge.Start, so the handshake never advances and this correctly reports reloaded:false. ' +
+                'Caveat (field notes #9): the reset does NOT re-fire the game\'s session-loaded events, so session-load logic ' +
+                '(PersistentVars setup, party registration) does not re-run — reload the save or restart the game for that. ' +
                 'Pass wait=false for fire-and-forget.',
             inputSchema: z.object({
                 context: contextSchema.describe(
@@ -914,12 +994,14 @@ function registerTools(server: McpServer): void {
                 'Resolve a character to its stable identity, or list the party. BG3 character identity is a minefield: ' +
                 'GetHostCharacter() returns a BARE UUID and follows CONTROL (it moves to a companion when the avatar is ' +
                 'downed and does not revert on resurrect), while Osiris events deliver PREFIXED template-name forms ' +
-                '(Elves_Female_High_Player_<uuid>) that fail bare-string equality. action=resolve takes any of those ' +
-                'forms (or a display name) and returns the bare uuid, the prefixed form, the display name, whether the ' +
-                'entity is the player-created Tav (the AvatarComponent, which stays put across control and death \u2014 the ' +
-                'reliable "who is the player" signal), whether it is currently host-controlled, HP, and dead/downed ' +
-                'state. action=party lists every party member the same way; action=host resolves whoever holds control ' +
-                'right now. Server-side only.',
+                "(Elves_Female_High_Player_<uuid>) that fail bare-string equality. action=resolve takes any of those " +
+                'forms (or a display name) and returns the bare uuid, the prefixed form, the display name, world ' +
+                'position, whether the entity is the player-created Tav (the AvatarComponent, which stays put across ' +
+                'control and death — the reliable "who is the player" signal), whether it is currently host-controlled, ' +
+                'HP, and dead/downed state. When the resolved character is not the avatar, the avatar is reported ' +
+                'separately. If nothing matches, found:false comes back with `diagnostics`: every probe tried and what ' +
+                'each returned, instead of a bare failure (field notes #8). action=party lists every party member the ' +
+                'same way; action=host resolves the control holder AND the avatar when they differ. Server-side only.',
             inputSchema: z.object({
                 action: z
                     .enum(['resolve', 'party', 'host'])
@@ -981,27 +1063,256 @@ function registerTools(server: McpServer): void {
             bridge('server', 'life', { action, character, amount, duration, settleMs }),
     );
 
+
+    defineTool(
+        server,
+        'bg3_play_effect',
+        {
+            title: 'Play a visual effect on a character',
+            description:
+                'Play a visual effect (VFX) on a character. This wraps the trap the field notes hit: Osi.PlayEffect takes the ' +
+                'Effect resource\'s GUID — the effect NAME is a silent no-op. This tool resolves the name (or GUID) against the ' +
+                'Effect resource bank first, refuses to fire an unresolved name, reads the resource\'s Looping flag and picks the ' +
+                'right call automatically: PlayLoopEffect for looping effects (returns a handle, tracked for bg3_stop_effect) and ' +
+                'PlayEffect for one-shots (no handle; they burn out after their Duration). Default bind bone is Dummy_Root, which ' +
+                'worked for body FX on every race tested. Find effect names with bg3_find_resource (type=Effect). Server-side only.',
+            inputSchema: z.object({
+                effect: z
+                    .string()
+                    .min(1)
+                    .describe('Effect name or resource GUID, e.g. "VFX_Status_HoH_Hope_Ghost_BodyFX_01" from bg3_find_resource type=Effect'),
+                character: z.string().optional().describe('Character UUID; defaults to the host character'),
+                bone: z.string().optional().describe('Bind bone, e.g. Dummy_Root (default), Dummy_Body, Dummy_HandR'),
+                scale: z.number().default(1).describe('Effect scale (looping effects only — PlayLoopEffect takes a scale parameter)'),
+            }),
+        },
+        // Hardcoded to server: PlayEffect/PlayLoopEffect are story calls.
+        async ({ effect, character, bone, scale }) => bridge('server', 'effect.play', { effect, character, bone, scale }),
+    );
+
+    defineTool(
+        server,
+        'bg3_stop_effect',
+        {
+            title: 'Stop looping effects this bridge started',
+            description:
+                'Stop looping visual effects. bg3_play_effect tracks every looping handle it creates; stop one by handle, ' +
+                'every loop on one character, or clear everything this tool started. One-shot effects have no handle and stop ' +
+                'on their own after their Duration. Caveat: handles live in the game VM — bg3_reload loses them, so stop loops ' +
+                'BEFORE reloading. Server-side only.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['stop', 'clear', 'list'])
+                    .optional()
+                    .describe(
+                        'stop one (by handle) or all (by character); clear stops everything tracked; list shows what is ' +
+                            'tracked. Defaults to stop when handle/character is given, list otherwise',
+                    ),
+                handle: z.string().optional().describe('Looping-effect handle from bg3_play_effect. Required for a single stop.'),
+                character: z.string().optional().describe('Stop every tracked looping effect on this character'),
+            }),
+        },
+        async ({ action, handle, character }) => {
+            const resolved = action ?? (handle !== undefined && handle !== '' ? 'stop' : 'list');
+            return bridge('server', 'effect.stop', { action: resolved, handle, character });
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_effects_near',
+        {
+            title: 'List visual effects active near a position',
+            description:
+                'List the placed/active visual effects around a position, nearest first, each resolved to its effect name and ' +
+                'resource GUID. CRITICAL: placed effect entities are only enumerable CLIENT-side — the server VM sees none of ' +
+                'them, which is how an agent wrongly concludes "no effect here" (field notes #4). This tool always runs in the ' +
+                'client context, so a save must be loaded. Pass a character to anchor at its position (resolved server-side ' +
+                'first), or explicit x/y/z. The attachedEntity field gives the entity handle each effect is bound to.',
+            inputSchema: z.object({
+                character: z.string().optional().describe("Anchor at this character's position (resolved server-side). Omit when position is given."),
+                position: z
+                    .object({ x: z.number(), y: z.number(), z: z.number() })
+                    .optional()
+                    .describe('Anchor position in world coordinates; overrides character'),
+                radius: z.number().default(20).describe('Metres around the anchor to include'),
+                limit: z.number().int().min(1).max(500).default(50).describe('Maximum effects returned, nearest first'),
+            }),
+        },
+        async ({ character, position, radius, limit }) => {
+            let anchor = position;
+            if (anchor === undefined && (character === undefined || character === '')) {
+                return failure('Provide position {x, y, z} or character (its position is resolved server-side first).');
+            }
+            if (anchor === undefined) {
+                try {
+                    const resolved = await callBridge<{ character?: { position?: { x: number; y: number; z: number } | null } }>(
+                        'server',
+                        'character.resolve',
+                        { id: character },
+                    );
+                    const pos = resolved.character?.position;
+                    if (pos === undefined || pos === null) {
+                        return failure(`Could not read a position for ${character} (server-side resolve returned none).`);
+                    }
+                    anchor = pos;
+                } catch (error) {
+                    return failure(`Could not resolve ${character}: ${(error as Error).message}`);
+                }
+            }
+            return bridge('client', 'effects.near', { position: anchor, radius, limit });
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_teleport',
+        {
+            title: 'Teleport the party to a level and confirm arrival',
+            description:
+                'Teleport the party to a level. The field notes\' biggest sharp edge, wrapped: the playable level name is the ' +
+                'LEVEL FOLDER name (Data/Editor/Mods/<Module>/Levels/<name>, e.g. BGO_HouseOfHope_C) — NOT the region/trigger ' +
+                'name (LOW_HouseOfHope2), which "succeeds" and drops the party into an unloaded blue void. This tool validates ' +
+                'the name against the real level list (bg3_list_levels) before calling, uses the correct 3-argument call, and ' +
+                'CONFIRMS arrival by polling Osi.GetRegion — TeleportPartiesToLevelWithMovie returns immediately while the level ' +
+                'streams in over ~15-25s, so confirmed:true is the only honest success. Use bg3_list_levels for names; pass ' +
+                'confirm=false to fire and return. CAVEAT (tested live): the region flips as soon as GEOMETRY loads, but ' +
+                'story-gated levels — e.g. the House of Hope from an act-1 save — populate only when the save has reached ' +
+                'that act: the level renders empty and a waypoint hop to an act-3 level does NOT fix it (population follows ' +
+                'the save\'s act/progression state, not the visit). The result carries `population` (non-party characters ' +
+                'near the arrival point); named == 0 means hollow — test story-gated levels from a save that has reached ' +
+                "that act. The arrival point is the level's DEFAULT entry, not a story-safe spawn: on a scripted level " +
+                "this can drop the party somewhere hostile (testing the House of Hope dropped the character into a chasm) — " +
+                "follow with a character-anchored teleport when needed. Server-side only. This MOVES THE PLAYER — only call " +
+                "when the user asked for it.",
+            inputSchema: z.object({
+                level: z
+                    .string()
+                    .min(1)
+                    .describe('Playable level name (the Levels folder name), e.g. BGO_HouseOfHope_C or WLD_Main_A. From bg3_list_levels.'),
+                confirm: z
+                    .boolean()
+                    .default(true)
+                    .describe('Wait for the region to actually change and report confirmed; false returns immediately'),
+                timeoutMs: z
+                    .number()
+                    .int()
+                    .min(3000)
+                    .max(120000)
+                    .default(40000)
+                    .describe('How long to poll for arrival before reporting confirmed:false (levels load in ~15-25s)'),
+            }),
+        },
+        // Server-side: TeleportPartiesToLevelWithMovie and GetRegion are story calls.
+        async ({ level, confirm, timeoutMs }) => {
+            const rejected = await validateTeleportLevel(level);
+            if (rejected !== null) return rejected;
+            return bridge('server', 'teleport', { level, confirm, timeoutMs }, {
+                timeoutMs: confirm ? timeoutMs + 10000 : 15000,
+            });
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_list_levels',
+        {
+            title: 'List the levels this game install carries',
+            description:
+                "List every playable level name, per module, read from the game's own Editor data " +
+                '(Data/Editor/Mods/<Module>/Levels/ — the stock install ships every module\'s levels as loose ' +
+                'directories; verified complete at 596 levels across 15 modules on a live Steam install). There is no ' +
+                'Lua-side enumeration: Ext.IO has no directory listing and no bank or Osiris DB carries levels (all ' +
+                'probed). These are the names bg3_teleport validates against and the names Osi.GetRegion returns — ' +
+                'the region/trigger names in Osiris events are DIFFERENT strings.',
+            inputSchema: z.object({
+                module: z.string().optional().describe('Only levels of modules whose name contains this, e.g. GustavDev'),
+                refresh: z.boolean().default(false).describe('Re-scan instead of returning the cached list'),
+            }),
+        },
+        async ({ module: moduleFilter, refresh }) => {
+            const gameDir = await findGameDir(refresh);
+            if (gameDir === null) {
+                return failure(
+                    'Could not locate the game install (game not running, no Steam registry entry). ' +
+                        'Set the BG3_GAME_DIR environment variable to the game root.',
+                );
+            }
+            const scan = await listLevels(gameDir, refresh);
+            const levels =
+                moduleFilter !== undefined && moduleFilter !== ''
+                    ? scan.levels.filter((entry) => entry.module.toLowerCase().includes(moduleFilter.toLowerCase()))
+                    : scan.levels;
+            return json({
+                gameDir,
+                count: levels.length,
+                totalInInstall: scan.levels.length,
+                modulesScanned: scan.modulesScanned,
+                ...(scan.errors.length > 0 ? { errors: scan.errors } : {}),
+                levels,
+            });
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_flag',
+        {
+            title: 'Read, set or clear a story flag',
+            description:
+                'Read or mutate Osiris story flags on a character — the dialog-granted states mods key off (e.g. ' +
+                'LOW_HouseOfHope_State_GaveBodyToIncubus, a dialog-granted deal). Probed semantics this tool wraps: runtime ' +
+                'flag names are <Name>_<ResourceUUID> (action=find resolves the short form); SetFlag/ClearFlag need ' +
+                'exactly 4 arguments (flag, character, 0, 1) — the shorter forms BIND and silently do nothing, which is ' +
+                'why raw Osi.SetFlag calls look like flags are read-only; and the object must be a real character (the ' +
+                'zero GUID no-ops even for global-ish flags). set/clear VERIFY by readback and report honestly when the ' +
+                'silent no-op hits. Flags persist in the save only once the game saves after the change. Search ~26k ' +
+                'flag declarations with action=find (results carry the current set-state on the target). Server-side only.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['find', 'get', 'set', 'clear'])
+                    .default('find')
+                    .describe('find searches flag declarations by query; get reads one; set/clear mutate one (with readback verification)'),
+                query: z.string().optional().describe("Substring for action=find, e.g. 'GaveBodyToIncubus', 'DBG_Act3', 'Act3'"),
+                flag: z
+                    .string()
+                    .optional()
+                    .describe(
+                        'Flag for get/set/clear: the full runtime name (Name_Guid) or the static short name, e.g. ' +
+                            "'LOW_HouseOfHope_State_GaveBodyToIncubus_54fb1ca4-b259-c4d8-7f9b-47b3dd889020'. Required.",
+                    ),
+                character: z.string().optional().describe('Character to read/mutate the flag on; defaults to the host character'),
+            }),
+        },
+        async ({ action, flag, query, character }) => bridge('server', 'flag', { action, flag, query, character }),
+    );
     defineTool(
         server,
         'bg3_osiris_functions',
         {
-            title: 'List or probe Osiris functions',
+            title: 'List, probe or look up Osiris functions',
             description:
                 'Discover Osiris calls/queries/events instead of guessing names like ApplyDamage/DealDamage/Damage ' +
                 'blindly. action=list enumerates the whole Osi table (pairs(Osi) is enumerable — ~1303 names on SE v32), ' +
-                'optionally narrowed by a substring query — this is the authoritative name set. What list cannot give is ' +
-                'a reliable arity/type per name: the generated signatures lie and only a real call settles a shape. ' +
-                'action=probe fills that gap for specific names by calling each with zero arguments inside pcall: SE ' +
-                'raises a distinct "No function named X ... with N parameters" for a name it knows (exists:true) versus ' +
-                'an "attempt to call a nil value" for one it does not (exists:false). SE rejects a wrong arity BEFORE ' +
-                'executing, so probing never triggers a mutating call (those are all arity >= 1); only a genuinely ' +
-                'parameterless function (usually a harmless query) would actually run, which is flagged. Probe confirms ' +
-                'existence, not the correct arity — the error text does not reveal it. Server-side only.',
+                'optionally narrowed by a substring query — this is the authoritative name set. action=signature reads ' +
+                "the exact declared parameters and overload arities from the Script Extender's generated reference " +
+                '(ReferenceLua/Osi.lua + Osi.Events.lua, shipped next to the executable) — this is the arity-trap killer: ' +
+                'Osi.SetFlag declares (flag, object, dialogInstance, sendFlagSetEventIfChanged) with 2-arity overloads ' +
+                'that BIND and silently no-op from Lua, Osi.TeleportPartiesToLevelWithMovie wants exactly 3 arguments, ' +
+                'Osi.CreateAt exactly 7. Works while the game is closed; falls back to a clear error when the reference ' +
+                'files are absent. Declared signatures are the map, not a guarantee — the SE proxy can still reject or ' +
+                'no-op an overload form, so confirm a critical call with action=probe or a real invocation. action=probe ' +
+                'calls named functions with zero arguments inside pcall: SE raises a distinct "No function named X ... ' +
+                'with N parameters" for a name it knows (exists:true) versus an "attempt to call a nil value" for one ' +
+                'it does not (exists:false). SE rejects a wrong arity BEFORE executing, so probing never triggers a ' +
+                'mutating call (those are all arity >= 1); only a genuinely parameterless function (usually a harmless ' +
+                'query) would actually run, which is flagged. list and probe run server-side in the game; signature is ' +
+                'answered by the MCP server itself.',
             inputSchema: z.object({
                 action: z
-                    .enum(['list', 'probe'])
+                    .enum(['list', 'probe', 'signature'])
                     .default('list')
-                    .describe('list enumerates Osi names (optionally filtered by query); probe checks specific names for existence'),
+                    .describe('list enumerates Osi names (optionally filtered by query); probe checks specific names for existence; signature returns declared parameters/overloads from the reference Lua'),
                 query: z
                     .string()
                     .optional()
@@ -1009,7 +1320,7 @@ function registerTools(server: McpServer): void {
                 names: z
                     .array(z.string().min(1))
                     .optional()
-                    .describe('Osiris function names to check for action=probe, e.g. ["ApplyDamage","SetHitpoints","Resurrect","Die"]'),
+                    .describe('Osiris function or event names for action=probe (existence) or action=signature (declared parameters), e.g. ["SetFlag","CreateAt","TeleportPartiesToLevelWithMovie"]'),
                 limit: z
                     .number()
                     .int()
@@ -1019,8 +1330,35 @@ function registerTools(server: McpServer): void {
                     .describe('Maximum names returned by action=list; matches are counted in full'),
             }),
         },
-        // Server-side: the Osi story-function table lives in the server VM.
-        async ({ action, query, names, limit }) => bridge('server', 'osiris.probe', { action, query, names, limit }),
+        async ({ action, query, names, limit }) => {
+            if (action !== 'signature') {
+                // Server-side: the Osi story-function table lives in the server VM.
+                return bridge('server', 'osiris.probe', { action, query, names, limit });
+            }
+
+            if (names === undefined || names.length === 0) {
+                return failure('action=signature requires names (Osiris function or event names), e.g. ["SetFlag","CreateAt"].');
+            }
+            if (!osirisReferenceAvailable()) {
+                return failure(
+                        "Osi.lua and Osi.Events.lua (and optionally ExtIdeHelpers.lua) into a ReferenceLua/ folder beside " +
+                        'bg3-bridge.exe (repo root when running from source).',
+                );
+            }
+            const reference = loadOsirisReference();
+            const results = names.map((name) => {
+                const fn = reference.functions.get(name);
+                if (fn !== undefined) {
+                    return { name, kind: 'function', found: true, params: fn.params, overloads: fn.overloads, arity: fn.arity };
+                }
+                const event = reference.events.get(name);
+                if (event !== undefined) {
+                    return { name, kind: 'event', found: true, params: event.params, overloads: event.overloads, arity: event.arity };
+                }
+                return { name, found: false };
+            });
+            return json({ reference: 'ReferenceLua/Osi.lua', count: results.length, signatures: results });
+        },
     );
 
     defineTool(
