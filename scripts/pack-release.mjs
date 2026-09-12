@@ -9,6 +9,7 @@
  *   ├── mod/                  companion mod source (dev / --loose installs)
  *   ├── ReferenceLua/         SE-generated API signatures (arity lookups)
  *   ├── README.md
+ *   ├── TOOLS.md              detailed tool recipes (optional reading)
  *   └── LICENSE
  *
  * The exe looks for mod/, BG3AgentBridge.pak and ReferenceLua/ relative to
@@ -66,6 +67,7 @@ if (existsSync(path.join(root, 'ReferenceLua'))) {
     cpSync(path.join(root, 'ReferenceLua'), path.join(staging, 'ReferenceLua'), { recursive: true });
 }
 copyFileSync(path.join(root, 'README.md'), path.join(staging, 'README.md'));
+copyFileSync(path.join(root, 'TOOLS.md'), path.join(staging, 'TOOLS.md'));
 copyFileSync(path.join(root, 'LICENSE'), path.join(staging, 'LICENSE'));
 
 // 4. Zip it. Zip targets live directly in dist/, next to the exe. Entries are
