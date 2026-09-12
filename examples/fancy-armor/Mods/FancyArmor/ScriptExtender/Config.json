@@ -1,5 +1,0 @@
-{
-    "RequiredVersion": 32,
-    "ModTable": "FancyArmor",
-    "FeatureFlags": ["Lua"]
-}
