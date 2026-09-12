@@ -1,27 +1,26 @@
 # BG3 Agent Bridge
+aka the Crown of Karsus
 
-An MCP server that gives whichever Coding AI you use (Claude Code, Codex, Kimi Code, etc.) a **live feedback loop into a running Baldur's Gate 3 session**, through the [Script Extender](https://github.com/Norbyte/bg3se).
+A MCP server that gives whichever Coding AI you use (Claude, GLM, DeepSeek, OpenAI, Kimi, etc.) a **live feedback loop into a running Baldur's Gate 3 session**, through the [Script Extender](https://github.com/Norbyte/bg3se). Much like the Crown of Karsus, this gives your big brain AI immense power to see inside the actual game as it runs.
 
-I've done most of my BG3 modding with the help of AI. The tedious nature writing code, launching the game, testing the code, pasting errors back into the AI, relaunching the game with the fixes, and so on is what this MCP server aims to fix. With this active, your AI can actually see the events and logs from your running game. It can reload scripts to test them without restarting the game (or even a needing to reload a save), inspect live entities, read stats, and manipulate the game (spawning NPCs, casting spells, most everything you as a player can do and more).
-
-Go to **[Quick start](#quick-start)** to get started, make sure you set up both the mod side and the server side.
+I've done most of my BG3 modding with the help of AI. The tedious nature writing code, launching the game, testing the code, pasting errors back into the AI, relaunching the game with the fixes, and so on is what this MCP server aims to fix. With this active, your AI can actually see the events and logs from your running game. It can reload scripts to test them without restarting the game (or even a needing to reload a save), inspect live entities, read stats, and manipulate the game (spawning NPCs, casting spells, reviving characters, reset hostility, teleporting, and most everything you as a player can do and more).
 
 I wanted to let my AI see into Larian's Toolkit, but the Toolkit has no plugin API, no headless mode, and no IPC. Nordbyte's Script Extender makes this bridge possible with the game itself.
 
 **What this is not:**
 
-- Not a replacement for [BG3 Modders Multitool](https://baldurs-gate-3.thunderstore.io/package/ShinyHobo/BG3_Modders_Multitool/), which is sadly been hidden on github. Forunately the core piece of multitool is still included in [Nordbyte's LSLib](https://github.com/Norbyte/lslib/), which you can let your AI agent know about to help you pack your mod when it's ready.
+- Not a replacement for [BG3 Modders Multitool](https://baldurs-gate-3.thunderstore.io/package/ShinyHobo/BG3_Modders_Multitool/), which is sadly been hidden on github. Fortunately the core piece of multitool is still included in [Nordbyte's LSLib](https://github.com/Norbyte/lslib/), which you can let your AI agent know about to help you pack your mod when it's ready.
 - Not a Toolkit automation layer.
 - Not a one-step tool. Don't expect to ask you AI to make you an awesome BG3 mod (make no mistakes) and expect it do it all for you.
 - Not a visual modding tool. The agent can't see the actual game visuals. I've had some success swapping icons and other visual elements, but you (the human) need to play an active role in confirming the visuals and describing what you see.
 
 ## Quick start
 
-**You need:** Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) (v32+).
+**You need:** Windows, Baldur's Gate 3, [Script Extender](https://github.com/Norbyte/bg3se), and an AI coding harness (created and tested initially through Claude Code and Kimi Code Harnesses - used primarily with [oh my pi](https://github.com/can1357/oh-my-pi)).
 
-1. **Download and extract** `bg3-agent-bridge-v0.5.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
+1. **Download and extract** `bg3-agent-bridge-v0.6.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) into a folder you'll keep (for example `C:\Tools\bg3-agent-bridge`).
 2. **Close Baldur's Gate 3, then double-click `bg3-bridge.exe`.** It installs the packed companion mod and prints a short MCP config block — copy it.
-3. **Paste that block to your AI agent** and ask it to add the server to its MCP config, then restart the agent. Launch BG3, load a save, and ask *"Is the BG3 bridge connected?"* — the agent takes it from there.
+3. **Paste that block to your AI agent** and ask it to add the server to its MCP config, then **restart the agent**. Launch BG3, load a save, and ask *"Is the BG3 bridge connected?"* — the agent takes it from there.
 
 <details>
 <summary>Prefer the command line? The same steps by hand.</summary>
@@ -40,23 +39,20 @@ Full client list and manual config live under [Connecting your AI agent](#connec
 
 **Caution:** this lets your AI agent run code inside your live game. That is the point, but only install it while you are actively modding, and [uninstall when you are done](#read-this-before-installing).
 
-### First things to ask your agent
+### Give it a Test Drive
 
-You never call tools yourself — talk to your agent in plain English and it picks the right one:
-
-- "Is the BG3 bridge connected?"
-- "Find a Flaming Fist guard template and spawn one next to me, then clear it afterwards."
-- "What status creates that green ghostly look? Preview it on my character."
-- "Reload my mod's Lua and tell me whether it loaded cleanly."
-- "Set my character to 1 HP so I can test my low-health passive."
-- "Drop my character to 0 HP and show me which events fire."
+Some examples of things to ask to try it out:
+- "Is the BG3 bridge connected? What can you do with it?"
+- "Find a Flaming Fist guard template and spawn one next to me."
+- "Spawn a hostile goblin with 1000 HP and start combat with my party."
+- "I'm looking for a vfx that looks shiny like the frog has in Act 1."
+- "What's the best way to get started making a mod with the agent bridge?"
+- "I have made this mod but I'm running into issues, can you review the code and test it out with the bridge?"
+- "Teleport my party to act II and give us the pixie blessing."
 
 See the full [Tools](#tools) table for everything it can do.
 
 ## How it works
-
-*Optional background — skip to [Install](#install) if you just want to use it.*
-
 The Script Extender has **no networking** — SE mods cannot open sockets. It does have `Ext.IO.SaveFile` / `Ext.IO.LoadFile` and a per-tick event, so the transport is a file mailbox in the Script Extender data directory:
 
 ```
@@ -68,19 +64,17 @@ MCP server (Node)                       Companion mod (Lua, in-game)
        |               {seq, ok, result|error}       |
 ```
 
-Writes are atomic (temp file plus rename), and a sequence cursor prevents replay after a VM reset. `server` and `client` contexts get separate mailboxes.
+Writes are small (temp file plus rename), and a sequence cursor prevents replay after a VM reset. `server` and `client` contexts get separate mailboxes.
 
 ## Read this before installing
-
 **This is a development tool, and it executes arbitrary Lua inside your game.**
 
-That is the whole point — `bg3_eval` runs whatever it is given in the live session. But it means:
-
+That is the whole point of what makes it so powerful — it runs whatever code directly in the live session which means:
 - The bridge reads commands from a **plain file in your Script Extender folder** — anything that can write there can run Lua in your game. There is no authentication; a file mailbox cannot have any.
-- Lua under the Script Extender can read and write files, so this is not sandboxed to the game.
-- Whatever agent you connect can do all of this without asking first.
+- Lua under the Script Extender can read and write files, so this is NOT sandboxed to the game.
+- Whatever agent you connect can do all of this without asking first. I have forgotten to give context before and the agent went off and made changes that broke my save. Be careful and make backups! Do NOT use this on a save file you want to keep!
 
-Fine while you are actively modding — the only situation it is built for. Bad to leave installed and forgotten.
+The bridge will run constantly once installed, even when BG3 and your coding harness are closed. Fine while you are actively modding, and not CPU intensive to leave it ready in the background. Best practice is to double-click the exe again and select "Uninstall" to ensure it isn't running anymore.
 
 **Uninstall it when you are done** — double-click `bg3-bridge.exe` again (with the game closed) and choose **Uninstall**, or from a terminal:
 
@@ -92,30 +86,26 @@ Then remove the server from your agent's MCP config. `bg3_bridge_status` reports
 
 ## Requirements
 
-- Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**. SE updates itself by default; older versions simply refuse to load the mod (`RequiredVersion`).
+- Windows, Baldur's Gate 3, and the [Script Extender](https://github.com/Norbyte/bg3se) **v32 or newer**. SE updates itself by default; older versions simply refuse to load the mod (`RequiredVersion`). Bring you AI coding harness of choice.
 
-That is the whole list — the release ships as a single `bg3-bridge.exe`, so there is **no Node.js, no npm, nothing to install first**. (Node 20+ is only needed to build from source.)
+The bridge was created and tested initially through Claude Code and Kimi Code Harnesses - in most cases I now use it with [oh my pi](https://github.com/can1357/oh-my-pi)). The release ships as a single `bg3-bridge.exe`.
 
-You do **not** need `divine.exe`, LSLib, or a mod manager to run the bridge. Those are only for building your own `.pak` later.
+You do not need `divine.exe`, LSLib, or a mod manager to run the bridge, although those are standard modding tools that will benefit you as well.
 
 ## Install
-
-The fastest path is the [Quick start](#quick-start): double-click `bg3-bridge.exe` for a guided setup that does all of the below. The manual steps here are the same actions, broken out — useful for scripting, headless setups, or when something needs adjusting.
-
-**1. Get the files.** Download `bg3-agent-bridge-v0.5.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere. The zip is `bg3-bridge.exe` plus the companion mod as a packed `BG3AgentBridge.pak` — one binary, no runtime to install, no mod manager required.
+The fastest path is the [Quick start](#quick-start): double-click `bg3-bridge.exe` for a guided setup that does all of the below in a few seconds. The manual steps here are the same actions, broken out — useful for scripting, headless setups, or when something needs adjusting.
 
 <details>
-<summary>From source instead (needs git, Node 20+, and npm)</summary>
-
+<summary>Manual Install Steps (needs git, Node 20+, and npm)</summary>
+**1. Get the files.** Download `bg3-agent-bridge-v0.6.0.zip` from the [Releases page](https://github.com/MCW8/bg3-agent-bridge/releases) and extract it anywhere - I highly recommend choosing a dedicated easy-to-remember folder instead of running it from the Downloads folder. The zip is `bg3-bridge.exe` and the companion mod as `BG3AgentBridge.pak`.
+       
 ```bash
 git clone https://github.com/MCW8/bg3-agent-bridge
 cd bg3-agent-bridge
 npm install && npm run build
 ```
 
-Every command below then runs under Node instead of the exe: `node scripts/install-dev.mjs`, `node scripts/configure-agent.mjs`, `node scripts/check-bridge.mjs`. To build the exe itself, drop `bun.exe` ([Bun releases](https://github.com/oven-sh/bun/releases)) into `tools/` and run `npm run build:exe`.
-
-</details>
+Then run the following commands (if not installing with the exe): `node scripts/install-dev.mjs`, `node scripts/configure-agent.mjs`, `node scripts/check-bridge.mjs`.
 
 **2. Install the mod, with the game closed.** In the folder you extracted:
 
@@ -187,23 +177,15 @@ Use `/` or escaped `\\` in paths. A single backslash is a JSON escape character 
 
 </details>
 
-**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with 27 tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
+**Confirm it registered** before blaming the bridge — most clients list connected servers in their UI. You want `bg3-agent-bridge` with tools named `bg3_*`; if absent, the problem is the config, not the game. **Restart the client after editing config** — almost none reload it live.
+</details>
 
-## Building your own mods
+## Packing Mods
 
-Only relevant once you are making mods rather than just running this. Packing needs `divine.exe`, the LSLib CLI:
-
-1. Download `ExportTool-vX.Y.Z.zip` from [LSLib releases](https://github.com/Norbyte/lslib/releases) and extract it anywhere
-2. `set BG3_DIVINE_PATH=C:\path\to\Tools\divine.exe`
-
-[BG3 Modders Multitool](https://github.com/ShinyHobo/BG3-Modders-Multitool) bundles divine — point `BG3_DIVINE_PATH` at its `Tools` folder if you use it. `.\bg3-bridge pack` packs the companion mod, searching `PATH` and the usual extract locations.
-
-Not vendored, deliberately: LSLib tracks game patches, so a bundled copy goes stale exactly when a patch lands, and shipping someone else's binary puts its integrity on this repo rather than upstream.
-
-A from-scratch showcase mod, built entirely through the bridge, is planned to demonstrate the workflow end to end.
+This tool does not pack mods. However, your AI Agent can help pack mods through Powershell scripting and `divine.exe` from [LSLib releases](https://github.com/Norbyte/lslib/releases).
 
 ## Tools
-
+Tools are still in active development, these are essentially shortcuts for your AI agent to understand how BG3 works and avoid wasting time/tokens on reinventing the wheel. You don't need to ask for a specific tool, your agent will use these when needed:
 | Tool | Purpose |
 |---|---|
 | `bg3_bridge_status` | Is the game running with the bridge loaded, and what does each context support |
@@ -245,7 +227,7 @@ Environment overrides: `BG3_SE_DIR`, `BG3_LOG_DIR`, `BG3_MODS_DIR`, `BG3_GAME_DI
 BG3 splits its data three ways, and the search tools mirror it. **Resources** (`bg3_find_resource`) are the raw asset bank — sounds, visuals, effects, animations — and give you the GUIDs the engine calls take. **Templates** (`bg3_find_template`) are world objects — items, characters, props — and carry cross-references (stat entry, visual GUID, parent template) one layer up. **Stats and static data** (`bg3_find_stat`, `bg3_find_static_data`) are the behavioural layer — statuses, spells, passives, MultiEffectInfo — and are what your mod's `Stats/` files edit. Work "what did I see → what is it called → what do I reference" in that order; `bg3_find_status_by_effect` jumps from an effect straight to the statuses that apply it. Runtime state (entities, components, live positions) is not any of these layers — that is `bg3_resolve_character`, `bg3_entity_inspect` and `bg3_schema`.
 
 ## Reading logs and tracing events
-
+It is highly recommended to enable all logging options in the [Mod Manager's](https://github.com/LaughingLeader/BG3ModManager) Script Extender settings, this will help your agent see more and troubleshoot.
 The log is the feedback channel for everything Lua and Osiris do, and it is split across channels: your mod's `print`/`Ext.Utils.Print` output and script errors land in the **Extender** log, story/rule traffic in the **Osiris** log. "Newest log overall" is usually the noisy Osiris one, so say which you mean:
 
 ```
