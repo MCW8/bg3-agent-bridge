@@ -25,6 +25,14 @@ if (!existsSync(bun)) {
 }
 
 const { version } = JSON.parse(readFileSync(path.join(root, 'package.json'), 'utf8'));
+const icon = path.join(root, 'assets', 'icon.ico');
+if (!existsSync(icon)) {
+    console.error('\n  assets/icon.ico is missing — the exe icon is the Crown of Karsus glyph.\n');
+    process.exit(1);
+}
+
+// Windows version resources want four parts (e.g. 0.6.0.0).
+const windowsVersion = /^\d+\.\d+\.\d+$/.test(version) ? `${version}.0` : version;
 
 mkdirSync(path.join(root, 'dist'), { recursive: true });
 
@@ -39,6 +47,14 @@ const result = spawnSync(
         '--target=bun-windows-x64',
         '--define',
         `BG3_BUILD_VERSION:"${version}"`,
+        '--windows-icon',
+        icon,
+        '--windows-title',
+        'BG3 Agent Bridge',
+        '--windows-description',
+        'Crown of Karsus - live MCP bridge into Baldur\'s Gate 3',
+        '--windows-version',
+        windowsVersion,
         path.join(root, 'src', 'cli', 'main.ts'),
         '--outfile',
         path.join(root, 'dist', 'bg3-bridge.exe'),
