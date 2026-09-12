@@ -4189,3 +4189,127 @@ H["flag"] = function(params)
 
     error("unknown action: " .. tostring(action) .. " (expected find, get, set or clear)")
 end
+
+--- Voice barks ------------------------------------------------------------------
+--
+-- Auditioning a voiced line is how you identify one that carries no
+-- localization text — a real gap when mining voice content, since
+-- Ext.Loca only resolves handles that HAVE text.
+--
+-- Osi.StartVoiceBark(bark, source) takes a VoiceBark RESOURCE guid and a
+-- character (signature from the generated reference, confirmed live). The
+-- resource's SourceFile points at the bark's .lsj definition, which is a
+-- LOOSE json file on disk — so an agent can pair this with bg3_vfs_list +
+-- bg3_read_file to read the handles a bark uses, and bg3_loca_search to see
+-- which of them have no text at all.
+--
+-- Not provided: playing an arbitrary .wem. Ext.Audio.PlayExternalSound wants
+-- an event authored for an EXTERNAL source, and the shipped banks expose no
+-- such event (the only Sound resource matching "External" is a cinematic
+-- whoosh, probed) — so there is no honest wrapper to build here yet.
+
+local function voiceBarkResources(query, limit)
+    local ok, guids = pcall(function()
+        return Ext.Resource.GetAll("VoiceBark")
+    end)
+    if not ok or type(guids) ~= "table" then
+        error("the VoiceBark resource bank is unavailable: " .. tostring(guids))
+    end
+
+    local needle = (type(query) == "string" and query ~= "") and string.lower(query) or nil
+    local matched, results = 0, {}
+    for _, guid in ipairs(guids) do
+        local okGet, resource = pcall(function()
+            return Ext.Resource.Get(guid, "VoiceBark")
+        end)
+        if okGet and resource ~= nil then
+            local source = ""
+            pcall(function()
+                source = tostring(resource.SourceFile)
+            end)
+            local guidText = tostring(guid)
+            local hit = needle == nil
+                or string.find(string.lower(source), needle, 1, true) ~= nil
+                or string.find(string.lower(guidText), needle, 1, true) ~= nil
+            if hit then
+                matched = matched + 1
+                if #results < limit then
+                    results[#results + 1] = {
+                        guid = guidText,
+                        name = string.match(source, "([^/\\]+)%.lsj$"),
+                        sourceFile = source,
+                    }
+                end
+            end
+        end
+    end
+    return matched, results
+end
+
+H["voice.bark"] = function(params)
+    local action = params.action or "find"
+    local limit = math.floor(tonumber(params.limit) or 25)
+    if limit < 1 then
+        limit = 1
+    elseif limit > 200 then
+        limit = 200
+    end
+
+    if action == "find" then
+        local matched, results = voiceBarkResources(params.query, limit)
+        return { action = "find", matched = matched, returned = #results, barks = results }
+    end
+
+    if action ~= "play" then
+        error("unknown action: " .. tostring(action) .. " (expected find or play)")
+    end
+
+    local bark = params.bark
+    if type(bark) ~= "string" or bark == "" then
+        error("params.bark is required — a VoiceBark resource GUID, or a name fragment to resolve (action=find lists them)")
+    end
+
+    -- A bare GUID plays directly; anything else resolves through the bank so
+    -- callers can pass the readable bark name from action=find.
+    local resolved = bark
+    local name = nil
+    if string.match(bark, "^%x%x%x%x%x%x%x%x%-") == nil then
+        local matched, results = voiceBarkResources(bark, 5)
+        if matched == 0 then
+            error("no VoiceBark resource matches '" .. bark .. "' — use action=find to search")
+        end
+        if matched > 1 then
+            local names = {}
+            for _, entry in ipairs(results) do
+                names[#names + 1] = tostring(entry.name or entry.guid)
+            end
+            error("'" .. bark .. "' matches " .. matched .. " barks — pass a GUID or a more specific fragment: "
+                .. table.concat(names, ", "))
+        end
+        resolved = results[1].guid
+        name = results[1].name
+    end
+
+    local character = params.character
+    if type(character) ~= "string" or character == "" then
+        character = Osi.GetHostCharacter()
+    end
+    if character == nil or character == "" then
+        error("no host character (is a save loaded?) — pass params.character")
+    end
+
+    local okPlay, err = pcall(function()
+        Osi.StartVoiceBark(resolved, tostring(character))
+    end)
+    if not okPlay then
+        error("Osi.StartVoiceBark failed: " .. tostring(err))
+    end
+
+    return {
+        action = "play",
+        bark = resolved,
+        name = name,
+        character = tostring(character),
+        note = "the call was accepted; audibility depends on the speaker being loaded and in range — confirm by ear",
+    }
+end

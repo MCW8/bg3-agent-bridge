@@ -1,6 +1,6 @@
 {
   "name": "bg3-agent-bridge-mcp",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "MCP server giving AI coding agents a live feedback loop into Baldur's Gate 3 via the Script Extender",
   "license": "MIT",
   "type": "module",

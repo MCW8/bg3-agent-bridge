@@ -1,4 +1,5 @@
 import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { bridgeDir, mailboxPaths } from './paths.js';
 
 export type BridgeContext = 'server' | 'client';
@@ -120,10 +121,31 @@ export async function callBridge<T = unknown>(
         await sleep(pollMs);
     }
 
+    // Three very different situations produce "no answer", and conflating them
+    // sent a prior session chasing a timeout that was really a closed game.
+    // Cheap to tell apart, and only on the failure path: is the process there,
+    // and did the mod ever hand us a handshake?
+    const running = spawnSync('tasklist', ['/FI', 'IMAGENAME eq bg3*.exe'], { encoding: 'utf8' });
+    const gameRunning = running.status === 0 && /bg3/i.test(running.stdout);
+    const booted = (await readJson<unknown>(paths.hello)) !== null;
+
+    if (!gameRunning) {
+        throw new BridgeTimeoutError(
+            `Baldur's Gate 3 is not running, so the ${context} context cannot answer (waited ${timeoutMs}ms). ` +
+                `Launch the game and load a save.`,
+        );
+    }
+    if (!booted) {
+        throw new BridgeTimeoutError(
+            `The game is running but the ${context} context never booted the bridge (no handshake file after ${timeoutMs}ms). ` +
+                `Check the mod is installed and enabled — bg3-bridge install — and that a save is loaded (the client context ` +
+                `only answers after a save loads).`,
+        );
+    }
     throw new BridgeTimeoutError(
-        `No response from the ${context} context within ${timeoutMs}ms. ` +
-            `Is Baldur's Gate 3 running with the BG3 Agent Bridge mod enabled? ` +
-            `The client context only answers once a save is loaded.`,
+        `The ${context} context is up but did not answer within ${timeoutMs}ms. ` +
+            `Heavy work (large scans, thousands of file probes) legitimately exceeds the default budget — raise timeoutMs, ` +
+            `or split the work and cache state in eval globals between calls.`,
     );
 }
 

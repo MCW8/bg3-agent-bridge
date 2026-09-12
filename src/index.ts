@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { readFileSync } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { existsSync, readFileSync } from 'node:fs';
+import { readFile, stat } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -11,8 +11,11 @@ import * as z from 'zod';
 import { callBridge, readHello, type BridgeContext, type CallOptions } from './mailbox.js';
 import { listLogSessions, tailLog } from './logs.js';
 import { findGameDir, listLevels } from './levels.js';
-import { bridgeDir, logDirectories, mailboxPaths } from './paths.js';
+import { bridgeDir, logDirectories, mailboxPaths, modsDir } from './paths.js';
+import { extractFile, searchVfs } from './vfs.js';
+import { searchLocalization } from './loca.js';
 import { loadOsirisReference, osirisReferenceAvailable } from './osirisRef.js';
+import { loadExtReference, extReferenceAvailable } from './extRef.js';
 import { ranDirectly } from './runtime.js';
 
 /**
@@ -735,9 +738,20 @@ function registerTools(server: McpServer): void {
                         'Keep capturing prints for this long after the chunk returns, so Ext.Timer callbacks it ' +
                             'scheduled are included. The reply waits for the window.',
                     ),
+                waitMs: z
+                    .number()
+                    .int()
+                    .min(1000)
+                    .max(600000)
+                    .optional()
+                    .describe(
+                        'How long the MCP server waits for the reply, on top of any pollUntil/captureMs window. ' +
+                            'Default 8000ms of headroom. Raise it for legitimately heavy in-VM work — large file scans, ' +
+                            'thousands of LoadFile probes — which otherwise time out mid-computation.',
+                    ),
             }),
         },
-        async ({ code, context, modContext, pollUntil, timeoutMs, intervalMs, captureMs }) => {
+        async ({ code, context, modContext, pollUntil, timeoutMs, intervalMs, captureMs, waitMs }) => {
             // The reply is deferred until the poll/capture window closes, so the
             // bridge timeout must outlast it with margin for the mailbox poll.
             const windowMs = Math.max(pollUntil !== undefined && pollUntil !== '' ? timeoutMs : 0, captureMs);
@@ -745,7 +759,7 @@ function registerTools(server: McpServer): void {
                 context,
                 'eval',
                 { code, modContext, pollUntil, timeoutMs, intervalMs, captureMs },
-                { timeoutMs: windowMs + 8000 },
+                { timeoutMs: windowMs + (waitMs ?? 8000) },
             );
         },
     );
@@ -1359,6 +1373,327 @@ function registerTools(server: McpServer): void {
             });
             return json({ reference: 'ReferenceLua/Osi.lua', count: results.length, signatures: results });
         },
+    );
+
+    defineTool(
+        server,
+        'bg3_introspect',
+        {
+            title: 'Look up Ext API signatures, enum values and component fields',
+            description:
+                'Answer "what arguments does this take" and "what values does this enum have" WITHOUT calling anything — ' +
+                'parsed from the Script Extender\'s generated IDE helpers (ReferenceLua/ExtIdeHelpers_v32.lua): ~400 Ext ' +
+                'functions, ~297 enums and ~3100 component/class field lists. This is the antidote to reverse-engineering ' +
+                'a call one error message at a time: Ext.Audio.PlayExternalSound comes back as (uint64, string, string, ' +
+                'AudioCodec, number?) with 4 required arguments, and AudioCodec lists Vorbis alongside the other codecs. ' +
+                'Component classes give field names and types offline, complementing bg3_schema (which reads a LIVE ' +
+                'instance and is the authority when the two disagree). Exact matches first, then substring matches. ' +
+                'Generic parameter names (a1, a2) are the generator\'s, not the API\'s — the TYPES and the optional ' +
+                'marker are the signal. For Osiris (Osi.*) names use bg3_osiris_functions action=signature. Answered by ' +
+                'the MCP server, so it works with the game closed.',
+            inputSchema: z.object({
+                query: z
+                    .string()
+                    .min(1)
+                    .describe('Name or fragment: "PlayExternalSound", "AudioCodec", "HealthComponent", "Ext.Entity", "Loca"'),
+                kind: z
+                    .enum(['any', 'function', 'enum', 'class'])
+                    .default('any')
+                    .describe('Restrict the lookup; "any" searches functions, enums and classes in that order'),
+                limit: z.number().int().min(1).max(100).default(20).describe('Maximum matches returned'),
+            }),
+        },
+        async ({ query, kind, limit }) => {
+            if (!extReferenceAvailable()) {
+                return failure(
+                    'ReferenceLua/ExtIdeHelpers_v32.lua was not found next to the executable. Copy the Script ' +
+                        "Extender's generated IDE helpers into a ReferenceLua/ folder beside bg3-bridge.exe (repo root " +
+                        'when running from source), or regenerate them in a running game with Ext.Types.GenerateIdeHelpers().',
+                );
+            }
+
+            const reference = loadExtReference();
+            const needle = query.toLowerCase();
+            const wantsFunctions = kind === 'any' || kind === 'function';
+            const wantsEnums = kind === 'any' || kind === 'enum';
+            const wantsClasses = kind === 'any' || kind === 'class';
+            const matches: unknown[] = [];
+
+            if (wantsFunctions) {
+                for (const entry of reference.functions.get(needle) ?? []) {
+                    matches.push({ kind: 'function', ...entry });
+                }
+            }
+            if (wantsEnums) {
+                const exact = reference.enums.get(needle);
+                if (exact !== undefined) matches.push({ kind: 'enum', name: exact.name, values: exact.values });
+            }
+            if (wantsClasses) {
+                const exact = reference.classes.get(needle);
+                if (exact !== undefined) {
+                    matches.push({ kind: 'class', name: exact.name, inherits: exact.inherits, fields: exact.fields });
+                }
+            }
+
+            const exactCount = matches.length;
+            if (wantsFunctions) {
+                for (const [key, entries] of reference.functions) {
+                    if (matches.length >= limit) break;
+                    if (key === needle || !key.includes(needle)) continue;
+                    for (const entry of entries) matches.push({ kind: 'function', ...entry });
+                }
+            }
+            if (wantsEnums) {
+                for (const [key, value] of reference.enums) {
+                    if (matches.length >= limit) break;
+                    if (key === needle || !key.includes(needle)) continue;
+                    matches.push({ kind: 'enum', name: value.name, values: value.values });
+                }
+            }
+            if (wantsClasses) {
+                for (const [key, value] of reference.classes) {
+                    if (matches.length >= limit) break;
+                    if (key === needle || !key.includes(needle)) continue;
+                    // Field lists on a fuzzy hit are noise; name the class and
+                    // let an exact follow-up query fetch its fields.
+                    matches.push({ kind: 'class', name: value.name, inherits: value.inherits, fieldCount: value.fields.length });
+                }
+            }
+
+            return json({
+                query,
+                exactMatches: exactCount,
+                returned: matches.length,
+                reference: 'ReferenceLua/ExtIdeHelpers_v32.lua',
+                matches: matches.slice(0, limit),
+            });
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_vfs_list',
+        {
+            title: 'List game files (paks and loose)',
+            description:
+                'Search the game\'s files by path — the thing the in-game API cannot do at all. Ext.IO exposes only ' +
+                'SaveFile/LoadFile/GetPathOverride/AddPathOverride (probed), so inside the game every path must be ' +
+                'GUESSED; this answers "what is actually in there" from outside. Each pak is listed once with divine ' +
+                '(LSLib) and cached, loose files under Data/ are indexed too, so the first query pays (~20-40s across a ' +
+                'modded install) and later ones are sub-second. Covers the three places paks hide: Data/, Data/<subdir>/ ' +
+                '(Localization/ holds English.pak, Voice.pak, VoiceMeta.pak — where voice and localization work lives) ' +
+                'and the user Mods/ folder. Results carry the pak that serves each path, which is what bg3_extract_file ' +
+                'and bg3_read_file need. Works with the game closed. Needs divine for pak contents (set BG3_DIVINE_PATH); ' +
+                'loose files still list without it.',
+            inputSchema: z.object({
+                query: z
+                    .string()
+                    .min(1)
+                    .describe('Substring of the path, e.g. "english.loca", "Soundbanks/v", "Levels/BGO", or a regex with regex=true'),
+                regex: z.boolean().default(false).describe('Treat query as a case-insensitive regular expression'),
+                pak: z.string().optional().describe('Only search paks whose file name contains this, e.g. "Voice", "Gustav"'),
+                include: z
+                    .enum(['all', 'paks', 'loose'])
+                    .default('all')
+                    .describe('Restrict to packed or loose files; loose-only skips divine entirely'),
+                limit: z.number().int().min(1).max(500).default(50).describe('Maximum entries returned; matches are counted in full'),
+                refresh: z.boolean().default(false).describe('Rebuild the loose-file index (paks re-index automatically when they change)'),
+            }),
+        },
+        async ({ query, regex, pak, include, limit, refresh }) => {
+            const gameDir = await findGameDir(false);
+            if (gameDir === null) {
+                return failure('Could not locate the game install. Set BG3_GAME_DIR to the Baldur\'s Gate 3 folder.');
+            }
+            try {
+                const result = await searchVfs({
+                    query,
+                    regex,
+                    pak,
+                    include,
+                    limit,
+                    refresh,
+                    dataDir: path.join(gameDir, 'Data'),
+                    modsDir: modsDir(),
+                });
+                return json(result);
+            } catch (error) {
+                return failure((error as Error).message);
+            }
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_extract_file',
+        {
+            title: 'Extract a game file to disk',
+            description:
+                'Copy a file out of the game data (pak or loose) to disk, so it can be inspected, converted or shipped. ' +
+                'Loose wins over packed, matching how the game resolves a path. Find paths with bg3_vfs_list. Needs ' +
+                'divine (LSLib) for packed files; loose files copy without it. Works with the game closed — no eval, no ' +
+                'hex-encoding through the mailbox, no payload ceiling.',
+            inputSchema: z.object({
+                path: z
+                    .string()
+                    .min(1)
+                    .describe('VFS path exactly as bg3_vfs_list reports it, e.g. "Localization/English/english.loca"'),
+                destination: z
+                    .string()
+                    .optional()
+                    .describe('Absolute destination path; defaults to the bridge\'s extracted/ folder next to the mailbox'),
+            }),
+        },
+        async ({ path: vfsPath, destination }) => {
+            const gameDir = await findGameDir(false);
+            if (gameDir === null) {
+                return failure('Could not locate the game install. Set BG3_GAME_DIR to the Baldur\'s Gate 3 folder.');
+            }
+            const target = destination ?? path.join(bridgeDir(), 'extracted', vfsPath.split('/').pop() ?? 'extracted.bin');
+            try {
+                const result = await extractFile(vfsPath, target, {
+                    dataDir: path.join(gameDir, 'Data'),
+                    modsDir: modsDir(),
+                });
+                return json({ path: vfsPath, destination: target, ...result });
+            } catch (error) {
+                return failure((error as Error).message);
+            }
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_read_file',
+        {
+            title: 'Read bytes from a game file',
+            description:
+                'Read a slice of any game file — packed or loose — as text, base64 or hex. Binary-safe and paged, which ' +
+                'the in-game path is not: Ext.Utils.Base64Encode does not exist, so reading bytes through eval means hex ' +
+                'strings that double in size and hit the response ceiling. This reads outside the game instead. Use ' +
+                'offset/length to page through large files; the response reports total size and eof.',
+            inputSchema: z.object({
+                path: z.string().min(1).describe('VFS path from bg3_vfs_list, e.g. "Mods/Gustav/Localization/English/Soundbanks/v<code>_<handle>.wem"'),
+                offset: z.number().int().min(0).default(0).describe('Byte offset to start at'),
+                length: z.number().int().min(1).max(262144).default(4096).describe('Bytes to read (max 256KB per call)'),
+                encoding: z
+                    .enum(['text', 'base64', 'hex'])
+                    .default('text')
+                    .describe('text for readable formats; base64 for binary payloads; hex for header inspection'),
+            }),
+        },
+        async ({ path: vfsPath, offset, length, encoding }) => {
+            const gameDir = await findGameDir(false);
+            if (gameDir === null) {
+                return failure('Could not locate the game install. Set BG3_GAME_DIR to the Baldur\'s Gate 3 folder.');
+            }
+            const cached = path.join(bridgeDir(), 'extracted', vfsPath.replace(/[\/:]/g, '_'));
+            try {
+                let source = 'cache';
+                if (!existsSync(cached)) {
+                    const extracted = await extractFile(vfsPath, cached, {
+                        dataDir: path.join(gameDir, 'Data'),
+                        modsDir: modsDir(),
+                    });
+                    source = extracted.source;
+                }
+                const buffer = await readFile(cached);
+                const end = Math.min(offset + length, buffer.length);
+                const slice = buffer.subarray(Math.min(offset, buffer.length), end);
+                return json({
+                    path: vfsPath,
+                    source,
+                    size: buffer.length,
+                    offset,
+                    returned: slice.length,
+                    eof: end >= buffer.length,
+                    encoding,
+                    data: encoding === 'text' ? slice.toString('utf8') : slice.toString(encoding),
+                });
+            } catch (error) {
+                return failure((error as Error).message);
+            }
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_loca_search',
+        {
+            title: 'Search localization text and handles',
+            description:
+                'Reverse lookup over the game\'s localization: find the handle for a piece of text, or the text for a ' +
+                'handle. Ext.Loca only goes handle → text, and its GetAllTranslatedStringKeys returns keyed strings ' +
+                '(<guid>_DisplayName), NOT the ~232k voiced-line handles — a misleading name that cost a previous ' +
+                'session real time. The .loca binary carries both, so it is extracted once from Localization/English.pak ' +
+                'and parsed by the MCP server: 232,878 entries, no 8s context timeout, no payload ceiling, and it works ' +
+                'with the game closed. Pass a handle as the query to resolve it directly.',
+            inputSchema: z.object({
+                query: z.string().min(1).describe('Text fragment to find, or a handle (h… form) to resolve'),
+                regex: z.boolean().default(false).describe('Treat query as a case-insensitive regular expression'),
+                limit: z.number().int().min(1).max(200).default(25).describe('Maximum matches returned; matches counted in full'),
+                language: z.string().default('English').describe('Localization language folder, e.g. English, French'),
+                refresh: z.boolean().default(false).describe('Re-extract and re-parse the .loca (after a game patch)'),
+            }),
+        },
+        async ({ query, regex, limit, language, refresh }) => {
+            const gameDir = await findGameDir(false);
+            if (gameDir === null) {
+                return failure('Could not locate the game install. Set BG3_GAME_DIR to the Baldur\'s Gate 3 folder.');
+            }
+            try {
+                const result = await searchLocalization({
+                    query,
+                    regex,
+                    limit,
+                    language,
+                    refresh,
+                    dataDir: path.join(gameDir, 'Data'),
+                    modsDir: modsDir(),
+                });
+                return json(result);
+            } catch (error) {
+                return failure((error as Error).message);
+            }
+        },
+    );
+
+    defineTool(
+        server,
+        'bg3_play_voiceline',
+        {
+            title: 'Find and play voice barks',
+            description:
+                'Audition voiced lines in the running game — the way to identify a line that carries no localization ' +
+                'text at all (Ext.Loca only resolves handles that HAVE text, so an untranscribed bark is invisible to ' +
+                'every text search). action=find searches the ~598 VoiceBark resources by name or path fragment and ' +
+                'returns each one\'s GUID plus the .lsj definition file that declares it; action=play calls ' +
+                'Osi.StartVoiceBark(bark, character) — pass a GUID or an unambiguous name fragment, speaker defaults to ' +
+                'the host. The .lsj files are LOOSE on disk, so pair this with bg3_vfs_list + bg3_read_file to read the ' +
+                'handles a bark uses and bg3_loca_search to see which have no text. Audibility depends on the speaker ' +
+                'being loaded and in range — the tool reports that the call was accepted, not that you heard it; confirm ' +
+                'by ear. Playing an arbitrary .wem is deliberately NOT offered: Ext.Audio.PlayExternalSound needs an ' +
+                'event authored for an external source and the shipped banks expose none (probed). Server-side only.',
+            inputSchema: z.object({
+                action: z
+                    .enum(['find', 'play'])
+                    .default('find')
+                    .describe('find searches VoiceBark resources; play starts one on a character'),
+                query: z
+                    .string()
+                    .optional()
+                    .describe('Name or path fragment for action=find, e.g. "Wyrm", "Act1/Underdark", "VampireSpawns"'),
+                bark: z
+                    .string()
+                    .optional()
+                    .describe('VoiceBark GUID, or an unambiguous name fragment, for action=play. Required for play.'),
+                character: z.string().optional().describe('Speaker character UUID; defaults to the host character'),
+                limit: z.number().int().min(1).max(200).default(25).describe('Maximum barks returned by action=find'),
+            }),
+        },
+        // Server-side: StartVoiceBark is a story call.
+        async ({ action, query, bark, character, limit }) =>
+            bridge('server', 'voice.bark', { action, query, bark, character, limit }),
     );
 
     defineTool(
