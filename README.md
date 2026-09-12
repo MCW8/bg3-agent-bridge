@@ -53,18 +53,18 @@ Some examples of things to ask to try it out:
 See the [Tools](#tools) table for the list, or [TOOLS.md](TOOLS.md) for recipes and traps.
 
 ## How it works
-The Script Extender has **no networking** — SE mods cannot open sockets. It does have `Ext.IO.SaveFile` / `Ext.IO.LoadFile` and a per-tick event, so the transport is a file mailbox in the Script Extender data directory:
 
-```
-MCP server (Node)                       Companion mod (Lua, in-game)
-       |                                             |
-       |-- write request_server.json --------------->|  polled on Ext.Events.Tick
-       |      {seq, op, params}                      |  dispatch -> pcall(handler)
-       |<------------- write response_server.json ---|
-       |               {seq, ok, result|error}       |
-```
+The Script Extender has **no networking** — SE mods cannot open sockets — so the bridge talks through files:
 
-Writes are small (temp file plus rename), and a sequence cursor prevents replay after a VM reset. `server` and `client` contexts get separate mailboxes.
+1. You ask the agent
+2. The MCP server writes `request_server.json` into the Script Extender folder
+3. The companion mod reads it on tick and runs the op
+4. It writes `response_server.json`
+5. The MCP server reads that and answers you
+
+Folder: `%LOCALAPPDATA%\Larian Studios\Baldur's Gate 3\Script Extender\BG3AgentBridge\`
+
+Writes are atomic (temp file plus rename). A sequence number prevents replay after a VM reset. Server and client each get their own pair of files.
 
 ## Read this before installing
 **This is a development tool, and it executes arbitrary Lua inside your game.**
